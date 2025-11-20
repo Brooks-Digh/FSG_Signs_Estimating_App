@@ -2149,6 +2149,22 @@ function closeInstallersPopup() {
 }
 </script>
 
+<script>
+// ===============================
+// Save & Restore Scroll Position
+// ===============================
+document.addEventListener("DOMContentLoaded", function () {
+    const savedPos = localStorage.getItem("scrollPos_" + window.location.pathname);
+    if (savedPos) {
+        window.scrollTo(0, parseInt(savedPos));
+    }
+});
+
+window.addEventListener("beforeunload", function () {
+    localStorage.setItem("scrollPos_" + window.location.pathname, window.scrollY);
+});
+</script>
+
 </body>
 </html>
 """
