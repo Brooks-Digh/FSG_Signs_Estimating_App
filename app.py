@@ -3684,23 +3684,48 @@ CONTRACT_TEMPLATE = """
 
 <hr>
 
+{% set tax_type = opportunity.tax_type or "Standard" %}
 {% set tax_rate = opportunity.tax_rate | float(0) %}
-{% set tax_amount = ns.total * (tax_rate / 100) %}
+{% set taxable = (tax_type != "New Construction" and tax_type != "Exempt") %}
+
+{% if taxable %}
+    {% set tax_amount = ns.total * (tax_rate / 100) %}
+{% else %}
+    {% set tax_amount = 0 %}
+{% endif %}
+
 {% set grand_total = ns.total + tax_amount %}
+{% set deposit = grand_total / 2 %}
+{% set final_balance = grand_total / 2 %}
 
 <!-- ✅ Totals Table with wrapper and enforced spacing -->
 <div class="totals-wrapper" style="width: 100%; overflow: hidden; margin-top: 20px;">
     <div class="totals" style="float: right; width: 40%;">
         <table class="totals-table" style="margin-bottom: 40px; white-space: nowrap;">
-            <tr><td><strong>Subtotal:</strong></td><td>${{ "{:,.2f}".format(ns.total) }}</td>
-            <tr><td><strong>Tax Rate:</strong></td><td>{{ '%.2f'|format(opportunity.tax_rate) }}%</td></tr>
-            <tr><td><strong>Tax:</strong></td><td>${{ "{:,.2f}".format(tax_amount) }}</td></tr>
-            <tr class="grand-total"><td><strong>Grand Total:</strong></td><td><strong>${{ "{:,.2f}".format(grand_total) }}</strong></td></tr>
+            <tr><td><strong>Subtotal:</strong></td>
+                <td>${{ "{:,.2f}".format(ns.total) }}</td></tr>
 
-            {% set deposit = grand_total / 2 %}
-            {% set final_balance = grand_total / 2 %}
-            <tr><td><strong>Deposit (50%):</strong></td><td>${{ "{:,.2f}".format(deposit) }}</td></tr>
-            <tr><td><strong>Final Balance (50%):</strong></td><td>${{ "{:,.2f}".format(final_balance) }}</td></tr>
+            <tr><td><strong>Tax Rate:</strong></td>
+                <td>
+                    {% if taxable %}
+                        {{ '%.2f'|format(tax_rate) }}%
+                    {% else %}
+                        0.00%
+                    {% endif %}
+                </td>
+            </tr>
+
+            <tr><td><strong>Tax:</strong></td>
+                <td>${{ "{:,.2f}".format(tax_amount) }}</td></tr>
+
+            <tr class="grand-total"><td><strong>Grand Total:</strong></td>
+                <td><strong>${{ "{:,.2f}".format(grand_total) }}</strong></td></tr>
+
+            <tr><td><strong>Deposit (50%):</strong></td>
+                <td>${{ "{:,.2f}".format(deposit) }}</td></tr>
+
+            <tr><td><strong>Final Balance (50%):</strong></td>
+                <td>${{ "{:,.2f}".format(final_balance) }}</td></tr>
         </table>
     </div>
 </div>
