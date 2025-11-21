@@ -641,7 +641,35 @@ def update_install_component_totals(component_id):
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
 
-    # --- Sum INSTALL materials ---
+    cursor.execute("""
+        SELECT line_ID
+        FROM Components
+        WHERE component_ID = ?
+    """, (component_id,))
+    row = cursor.fetchone()
+    line_id = row[0] if row else None
+
+    opportunity_id = None
+    tax_type = None
+
+    if line_id is not None:
+        cursor.execute("""
+            SELECT opportunity_ID
+            FROM Line_Items
+            WHERE line_ID = ?
+        """, (line_id,))
+        row = cursor.fetchone()
+        opportunity_id = row[0] if row else None
+
+    if opportunity_id is not None:
+        cursor.execute("""
+            SELECT tax_type
+            FROM Opportunities
+            WHERE opportunity_ID = ?
+        """, (opportunity_id,))
+        row = cursor.fetchone()
+        tax_type = row[0] if row else None
+
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
         FROM component_install_Materials
@@ -649,16 +677,15 @@ def update_install_component_totals(component_id):
     """, (component_id,))
     material_total = cursor.fetchone()[0] or 0
 
-    # --- Sum INSTALL labor ---
     cursor.execute("""
         SELECT SUM(ci.quantity * ilt.burden_rate)
         FROM component_install_Labor ci
-        INNER JOIN Install_Labor_Types ilt ON ci.install_labor_ID = ilt.install_labor_ID
+        INNER JOIN Install_Labor_Types ilt 
+            ON ci.install_labor_ID = ilt.install_labor_ID
         WHERE ci.component_ID = ?
     """, (component_id,))
     labor_total = cursor.fetchone()[0] or 0
 
-    # --- Sum SUBCONTRACTOR install cost ---
     cursor.execute("""
         SELECT SUM(subcontractor_cost)
         FROM subcontractor_install_cost
@@ -666,20 +693,22 @@ def update_install_component_totals(component_id):
     """, (component_id,))
     subcontract_total = cursor.fetchone()[0] or 0
 
-    # --- Compute new unit_cost ---
     unit_cost = float(material_total) + float(labor_total) + float(subcontract_total)
 
-    # --- Compute new unit_price ---
-    # Materials use 1.45 mark-up
-    # Labor uses 1.32 mark-up
-    # Subcontractor cost ALSO uses 1.32 mark-up (per your requirement)
-    unit_price = (
+    if tax_type != "New Construction":
+        unit_price = (
         float(material_total) * 1.45 +
         float(labor_total) * 1.32 +
         float(subcontract_total) * 1.32
-    )
+        )
 
-    # --- Update the Components table ---
+    else:
+        unit_price = (
+                float(material_total) * 1.45 * 1.093325 +
+                float(labor_total) * 1.32 +
+                float(subcontract_total) * 1.32
+        )
+
     cursor.execute("""
         UPDATE Components
         SET unit_cost = ?, unit_price = ?
@@ -688,6 +717,7 @@ def update_install_component_totals(component_id):
 
     conn.commit()
     conn.close()
+
 
 ########################################################################################################################
 
