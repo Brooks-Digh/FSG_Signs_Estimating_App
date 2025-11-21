@@ -1136,6 +1136,14 @@ OPPORTUNITIES_TEMPLATE = """
 
                 <label>Tax Rate (%):</label>
                 <input type="number" name="tax_rate" id="tax_rate" step="0.01" min="0" value="0.00" required><br><br>
+
+                <label>Tax Type:</label>
+                <select name="tax_type" required>
+                <option value="Standard" selected>Standard</option>
+                <option value="Exempt">Exempt</option>
+                <option value="New Construction">New Construction</option>
+                </select>
+                <br><br>
             </div>
 
             <div class="form-col">
