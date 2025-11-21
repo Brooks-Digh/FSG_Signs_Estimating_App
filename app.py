@@ -881,6 +881,35 @@ def update_pipe_foundation_totals(component_id):
     cursor = conn.cursor()
 
     cursor.execute("""
+        SELECT line_ID
+        FROM Components
+        WHERE component_ID = ?
+    """, (component_id,))
+    row = cursor.fetchone()
+    line_id = row[0] if row else None
+
+    opportunity_id = None
+    tax_type = None
+
+    if line_id is not None:
+        cursor.execute("""
+            SELECT opportunity_ID
+            FROM Line_Items
+            WHERE line_ID = ?
+        """, (line_id,))
+        row = cursor.fetchone()
+        opportunity_id = row[0] if row else None
+
+    if opportunity_id is not None:
+        cursor.execute("""
+            SELECT tax_type
+            FROM Opportunities
+            WHERE opportunity_ID = ?
+        """, (opportunity_id,))
+        row = cursor.fetchone()
+        tax_type = row[0] if row else None
+
+    cursor.execute("""
         SELECT digging_cost, concrete_cost, additional_footer_costs, pipe_cost
         FROM component_pipe_and_foundation
         WHERE component_ID = ?
@@ -889,8 +918,15 @@ def update_pipe_foundation_totals(component_id):
 
     if row:
         digging, concrete, additional, pipe = [float(v or 0) for v in row]
-        unit_cost = digging + concrete + additional + pipe
-        unit_price = unit_cost * 1.35
+        material_unit_cost = concrete + pipe
+        labor_unit_cost = digging + additional
+        unit_cost = material_unit_cost + labor_unit_cost
+
+        if tax_type != "New Construction":
+            unit_price = unit_cost * 1.35
+
+        else:
+            unit_price = material_unit_cost * 1.35 * 1.093325 + labor_unit_cost * 1.35
 
         cursor.execute("""
             UPDATE Components
