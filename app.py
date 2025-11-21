@@ -103,10 +103,10 @@ def add_opportunity(customer_id, opportunity_name, tax_rate, site_address, site_
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO Opportunities (customer_ID, opportunity_name, tax_rate, opportunity_price, site_address, site_city, 
+        INSERT INTO Opportunities (customer_ID, opportunity_name, tax_rate, tax_type, opportunity_price, site_address, site_city, 
         site_state, site_zip)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (customer_id, opportunity_name, tax_rate, 0, site_address, site_city, site_state, site_zip))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (customer_id, opportunity_name, tax_rate, tax_type, 0, site_address, site_city, site_state, site_zip))
     conn.commit()
     conn.close()
 
@@ -4031,12 +4031,13 @@ def add_opportunity_route():
     customer_id = request.form["customer_id"]
     opportunity_name = request.form["opportunity_name"]
     tax_rate = float(request.form.get("tax_rate", 0))
+    tax_type = request.form.get("tax_type")
     site_address = request.form["site_address"]
     site_city = request.form["site_city"]
     site_state = request.form["site_state"]
     site_zip = request.form["site_zip"]
 
-    add_opportunity(customer_id, opportunity_name, tax_rate, site_address, site_city, site_state, site_zip)
+    add_opportunity(customer_id, opportunity_name, tax_rate, tax_type, site_address, site_city, site_state, site_zip)
     return redirect(url_for("index"))
 
 ########################################################################################################################
