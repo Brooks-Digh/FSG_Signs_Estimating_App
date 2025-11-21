@@ -787,7 +787,35 @@ def update_emc_component_totals(component_id):
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
 
-    # Sum EMC rows
+    cursor.execute("""
+        SELECT line_ID
+        FROM Components
+        WHERE component_ID = ?
+    """, (component_id,))
+    row = cursor.fetchone()
+    line_id = row[0] if row else None
+
+    opportunity_id = None
+    tax_type = None
+
+    if line_id is not None:
+        cursor.execute("""
+            SELECT opportunity_ID
+            FROM Line_Items
+            WHERE line_ID = ?
+        """, (line_id,))
+        row = cursor.fetchone()
+        opportunity_id = row[0] if row else None
+
+    if opportunity_id is not None:
+        cursor.execute("""
+            SELECT tax_type
+            FROM Opportunities
+            WHERE opportunity_ID = ?
+        """, (opportunity_id,))
+        row = cursor.fetchone()
+        tax_type = row[0] if row else None
+
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
         FROM component_EMC
@@ -796,7 +824,12 @@ def update_emc_component_totals(component_id):
     total_cost = cursor.fetchone()[0] or 0
 
     unit_cost = float(total_cost)
-    unit_price = unit_cost * 1.315
+
+    if tax_type != "New Construction":
+        unit_price = unit_cost * 1.315
+
+    else:
+        unit_price = unit_cost * 1.315 * 1.093325
 
     cursor.execute("""
         UPDATE Components
