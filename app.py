@@ -8334,11 +8334,29 @@ def pipe_foundation_costs(component_id):
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
 
+    cursor.execute("SELECT line_ID FROM Components WHERE component_ID = ?", (component_id,))
+    row_line = cursor.fetchone()
+    line_id = row_line[0] if row_line else None
+
+    opportunity_id = None
+    tax_type = None
+
+    if line_id is not None:
+        cursor.execute("SELECT opportunity_ID FROM Line_Items WHERE line_ID = ?", (line_id,))
+        row_opp = cursor.fetchone()
+        opportunity_id = row_opp[0] if row_opp else None
+
+    if opportunity_id is not None:
+        cursor.execute("SELECT tax_type FROM Opportunities WHERE opportunity_ID = ?", (opportunity_id,))
+        row_tax = cursor.fetchone()
+        tax_type = row_tax[0] if row_tax else None
+
     cursor.execute("""
-        SELECT pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, stack_pipe1_diameter, 
-               stack_pipe1_footage, stack_pipe2_diameter, stack_pipe2_footage, stack_pipe3_diameter, stack_pipe3_footage, 
-               stack_pipe4_diameter, stack_pipe4_footage, pier_quantity, rectangular_footer_length, rectangular_footer_width,
-               rectangular_footer_depth, digging_cost, concrete_cost, additional_footer_cost, pipe_cost
+        SELECT pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, 
+               stack_pipe1_diameter, stack_pipe1_footage, stack_pipe2_diameter, stack_pipe2_footage, 
+               stack_pipe3_diameter, stack_pipe3_footage, stack_pipe4_diameter, stack_pipe4_footage, 
+               pier_quantity, rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth, 
+               digging_cost, concrete_cost, additional_footer_cost, pipe_cost
         FROM component_pipe_and_foundation
         WHERE component_ID = ?
     """, (component_id,))
@@ -8348,29 +8366,39 @@ def pipe_foundation_costs(component_id):
     if not row:
         return "Pipe/Foundation data not found", 404
 
-    (pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, stack_pipe1_diameter, stack_pipe1_footage,
-     stack_pipe2_diameter, stack_pipe2_footage, stack_pipe3_diameter, stack_pipe3_footage, stack_pipe4_diameter,
-     stack_pipe4_footage, pier_quantity, rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
+    (pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, stack_pipe1_diameter,
+     stack_pipe1_footage, stack_pipe2_diameter, stack_pipe2_footage, stack_pipe3_diameter,
+     stack_pipe3_footage, stack_pipe4_diameter, stack_pipe4_footage, pier_quantity,
+     rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
      digging_cost, concrete_cost, additional_footer_cost, pipe_cost) = row
 
     if request.method == "POST":
+
         digging_cost = float(request.form.get("digging_cost", 0))
         concrete_cost = float(request.form.get("concrete_cost", 0))
         additional_footer_cost = float(request.form.get("additional_footer_cost", 0))
         pipe_cost = float(request.form.get("pipe_cost", 0))
 
-        unit_cost = digging_cost + concrete_cost + additional_footer_cost + pipe_cost
-        unit_price = unit_cost * 1.45
+        material_unit_cost = concrete_cost + pipe_cost
+        labor_unit_cost = digging_cost + additional_footer_cost
+        unit_cost = material_unit_cost + labor_unit_cost
+
+        if tax_type != "New Construction":
+            unit_price = unit_cost * 1.35
+
+        else:
+            unit_price = material_unit_cost * 1.35 * 1.093325 + labor_unit_cost * 1.35
+
 
         conn = pyodbc.connect(CONN_STR)
         cursor = conn.cursor()
+
         cursor.execute("""
             UPDATE component_pipe_and_foundation
             SET digging_cost=?, concrete_cost=?, additional_footer_cost=?, pipe_cost=?
             WHERE component_ID=?
         """, (digging_cost, concrete_cost, additional_footer_cost, pipe_cost, component_id))
 
-        # ✅ update Components table too
         cursor.execute("""
             UPDATE Components
             SET unit_cost=?, unit_price=?
@@ -8382,7 +8410,6 @@ def pipe_foundation_costs(component_id):
 
         return redirect(url_for("quote_component", component_id=component_id, component_type_id=3))
 
-    # ✅ fetch unit_cost and unit_price for display
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
     cursor.execute("""
@@ -8396,7 +8423,6 @@ def pipe_foundation_costs(component_id):
     unit_cost = cost_row.unit_cost if cost_row else 0
     unit_price = cost_row.unit_price if cost_row else 0
 
-    # Pass current values to template
     context = dict(
         component_id=component_id,
         pier_depth=pier_depth,
@@ -8421,7 +8447,9 @@ def pipe_foundation_costs(component_id):
         pipe_cost=pipe_cost or 0,
         unit_cost=unit_cost,
         unit_price=unit_price,
+        tax_type=tax_type
     )
+
     return render_template_string(QUOTE_PIPE_FOUNDATION_COSTS, **context)
 
 ########################################################################################################################
