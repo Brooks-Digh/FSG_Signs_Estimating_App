@@ -4350,8 +4350,8 @@ def contract_route(opportunity_id):
 
     # Fetch opportunity info
     cursor.execute("""
-        SELECT o.opportunity_ID, o.opportunity_name, o.opportunity_price, o.tax_rate, o.site_address, o.site_city,
-               o.site_state, o.site_zip, 
+        SELECT o.opportunity_ID, o.opportunity_name, o.opportunity_price, o.tax_rate, o.tax_type, o.site_address, 
+               o.site_city, o.site_state, o.site_zip, 
                c.customer_name, c.customer_email, c.contact_first_name, c.contact_last_name, c.contact_phone,
                c.billing_address, c.billing_city, c.billing_state, c.billing_zip
         FROM Opportunities o
@@ -4369,6 +4369,7 @@ def contract_route(opportunity_id):
         "opportunity_name": opportunity.opportunity_name,
         "opportunity_price": float(opportunity.opportunity_price or 0),
         "tax_rate": float(opportunity.tax_rate or 0),
+        "tax_type": opportunity.tax_type or "Standard",
         "site_address": opportunity.site_address,
         "site_city": opportunity.site_city,
         "site_state": opportunity.site_state,
@@ -4406,8 +4407,13 @@ def contract_route(opportunity_id):
             subtotal += item["subtotal"]
             active_items.append(item)
 
-    tax_rate = opportunity_dict["tax_rate"]
-    tax_amount = subtotal * (tax_rate / 100)
+    tax_type = opportunity_dict["tax_type"]
+
+    if tax_type in ["Exempt", "New Construction"]:
+        tax_amount = 0.0
+    else:
+        tax_amount = subtotal * (opportunity_dict["tax_rate"] / 100)
+
     grand_total = subtotal + tax_amount
 
     # ✅ Embed your company logo directly as Base64
