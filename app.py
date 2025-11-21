@@ -1812,7 +1812,7 @@ LINE_ITEMS_TEMPLATE = """
           <option value="New Construction" {% if tax_type == 'New Construction' %}selected{% endif %}>New Construction</option>
           </select>
           <br><br>
-          
+
         </div>
 
         <div class="form-col">
@@ -4057,6 +4057,7 @@ def add_opportunity_route():
 def update_opportunity_route(opportunity_id):
     opportunity_name = request.form.get("opportunity_name")
     tax_rate = request.form.get("tax_rate")
+    tax_type = request.form.get("tax_type")
     site_address = request.form.get("site_address")
     site_city = request.form.get("site_city")
     site_state = request.form.get("site_state")
@@ -4066,9 +4067,9 @@ def update_opportunity_route(opportunity_id):
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE Opportunities
-        SET opportunity_name = ?, tax_rate = ?, site_address = ?, site_city = ?, site_state = ?, site_zip = ?
+        SET opportunity_name = ?, tax_rate = ?, tax_type = ?, site_address = ?, site_city = ?, site_state = ?, site_zip = ?
         WHERE opportunity_ID = ?
-    """, (opportunity_name, tax_rate, site_address, site_city, site_state, site_zip, opportunity_id))
+    """, (opportunity_name, tax_rate, tax_type, site_address, site_city, site_state, site_zip, opportunity_id))
     conn.commit()
     conn.close()
 
