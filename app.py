@@ -1804,6 +1804,15 @@ LINE_ITEMS_TEMPLATE = """
 
           <label for="tax_rate">Tax Rate (%):</label>
           <input type="number" name="tax_rate" step="0.01" min="0" value="{{ tax_rate }}"><br><br>
+
+          <label>Tax Type:</label>
+          <select name="tax_type">
+          <option value="Standard" {% if tax_type == 'Standard' %}selected{% endif %}>Standard</option>
+          <option value="Exempt" {% if tax_type == 'Exempt' %}selected{% endif %}>Exempt</option>
+          <option value="New Construction" {% if tax_type == 'New Construction' %}selected{% endif %}>New Construction</option>
+          </select>
+          <br><br>
+          
         </div>
 
         <div class="form-col">
