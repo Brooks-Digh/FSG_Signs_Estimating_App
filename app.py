@@ -1,5 +1,6 @@
 from flask import Flask, session, render_template_string, url_for, request, redirect, flash, jsonify
-import pyodbc
+import psycopg2
+import psycopg2.extras
 import math
 from decimal import Decimal
 import base64
@@ -20,11 +21,14 @@ app.secret_key = 'super_secret_key_123'
 """"""
 ########################################################################################################################
 
-DB_PATH = r"C:\Users\Brooks\OneDrive\Desktop\Sign_App1 - Step 3.accdb"
-CONN_STR = (
-    r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
-    rf"DBQ={DB_PATH};"
-)
+def get_db_connection():
+    return psycopg2.connect(
+        dbname="sign_app",
+        user="postgres",
+        password="Rosie225!",  # change to your actual password
+        host="localhost",
+        port="5432"
+    )
 
 ########################################################################################################################
 ########################################################################################################################
@@ -45,18 +49,33 @@ CONN_STR = (
 """HELPER FUNCTION TO GET CUSTOMER DATA"""
 
 def get_customers():
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    query = """
-        SELECT customer_ID, customer_name, customer_email, billing_address, billing_city, billing_state, billing_zip,
-        contact_first_name, contact_last_name, contact_phone
-        FROM Customers
-        ORDER BY customer_name
-    """
-    cursor.execute(query)
+
+    cursor.execute("""
+        SELECT 
+            "customer_ID",
+            customer_name,
+            customer_email,
+            billing_address,
+            billing_city,
+            billing_state,
+            billing_zip,
+            contact_first_name,
+            contact_last_name,
+            contact_phone
+        FROM "Customers"
+        ORDER BY customer_name;
+    """)
+
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [desc[0] for desc in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
@@ -64,15 +83,23 @@ def get_customers():
 
 def add_customer(customer_name, customer_email, billing_address, billing_city, billing_state, billing_zip,
                  contact_first_name, contact_last_name, contact_phone):
-    conn = pyodbc.connect(CONN_STR)
+
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        INSERT INTO Customers (customer_name, customer_email, billing_address, billing_city, billing_state, billing_zip,
-        contact_first_name, contact_last_name, contact_phone)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO "Customers" (
+            customer_name, customer_email, billing_address, billing_city, billing_state, billing_zip,
+            contact_first_name, contact_last_name, contact_phone
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-    cursor.execute(query, (customer_name, customer_email, billing_address, billing_city, billing_state,
-                           billing_zip, contact_first_name, contact_last_name, contact_phone))
+
+    cursor.execute(query, (
+        customer_name, customer_email, billing_address, billing_city, billing_state,
+        billing_zip, contact_first_name, contact_last_name, contact_phone
+    ))
+
     conn.commit()
     conn.close()
 
@@ -81,32 +108,53 @@ def add_customer(customer_name, customer_email, billing_address, billing_city, b
 """HELPER FUNCTION TO GET OPPORTUNITY DATA."""
 
 def get_opportunities():
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        SELECT o.opportunity_ID, o.opportunity_name,
-               c.customer_ID, c.customer_name, c.customer_email
-        FROM Opportunities o
-        INNER JOIN Customers c ON CStr(o.customer_ID) = CStr(c.customer_ID)
-        ORDER BY o.opportunity_ID;
+        SELECT 
+            o."opportunity_ID",
+            o.opportunity_name,
+            c."customer_ID",
+            c.customer_name,
+            c.customer_email
+        FROM "Opportunities" o
+        INNER JOIN "Customers" c
+            ON o."customer_ID" = c."customer_ID"
+        ORDER BY o.opportunity_name;
     """
+
     cursor.execute(query)
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [desc[0] for desc in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO CREATE A NEW OPPORTUNITY"""
 
-def add_opportunity(customer_id, opportunity_name, tax_rate, site_address, site_city, site_state, site_zip):
-    conn = pyodbc.connect(CONN_STR)
+def add_opportunity(customer_id, opportunity_name, tax_rate, tax_type, site_address, site_city, site_state, site_zip):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO Opportunities (customer_ID, opportunity_name, tax_rate, tax_type, opportunity_price, site_address, site_city, 
-        site_state, site_zip)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (customer_id, opportunity_name, tax_rate, tax_type, 0, site_address, site_city, site_state, site_zip))
+
+    query = """
+        INSERT INTO "Opportunities" (
+            "customer_ID", opportunity_name, tax_rate, tax_type, opportunity_price,
+            site_address, site_city, site_state, site_zip
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    cursor.execute(query, (
+        customer_id, opportunity_name, tax_rate, tax_type, 0,
+        site_address, site_city, site_state, site_zip
+    ))
+
     conn.commit()
     conn.close()
 
@@ -115,23 +163,25 @@ def add_opportunity(customer_id, opportunity_name, tax_rate, site_address, site_
 """HELPER FUNCTION TO UPDATE OPPORTUNITY TOTAL PRICE"""
 
 def update_opportunity_price(opportunity_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Sum all line item totals (unit_price * quantity)
+    # Sum all line item totals (quantity * unit_price)
     cursor.execute("""
-        SELECT SUM(CDbl(quantity) * CDbl(unit_price))
-        FROM Line_Items
-        WHERE opportunity_ID = ?
+        SELECT SUM(quantity * unit_price)
+        FROM "Line_Items"
+        WHERE "opportunity_ID" = %s
     """, (opportunity_id,))
+
     total = cursor.fetchone()[0] or 0
 
     # Update the Opportunities table
     cursor.execute("""
-        UPDATE Opportunities
-        SET opportunity_price = ?
-        WHERE opportunity_ID = ?
+        UPDATE "Opportunities"
+        SET opportunity_price = %s
+        WHERE "opportunity_ID" = %s
     """, (total, opportunity_id))
+
     conn.commit()
     conn.close()
 
@@ -140,14 +190,17 @@ def update_opportunity_price(opportunity_id):
 """HELPER FUNCTION TO GET LINE ITEM DATA."""
 
 def get_line_items(opportunity_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     cursor.execute("""
-        SELECT line_ID, line_item_description, quantity, unit_price, activation_status, line_item_sequence
-        FROM Line_Items
-        WHERE opportunity_ID = ?
-        ORDER BY line_item_sequence
+        SELECT "line_ID", "line_item_description", quantity, unit_price,
+               activation_status, "line_item_sequence"
+        FROM "Line_Items"
+        WHERE "opportunity_ID" = %s
+        ORDER BY "line_item_sequence"
     """, (opportunity_id,))
+
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -157,12 +210,28 @@ def get_line_items(opportunity_id):
 """HELPER FUNCTION TO CREATE A NEW LINE ITEM"""
 
 def add_line_item(opportunity_id, description, quantity, sequence_number, activation_status="ACTIVE"):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-         INSERT INTO Line_Items (opportunity_ID, line_item_description, quantity, activation_status, line_item_sequence)
-         VALUES (?, ?, ?, ?, ?)
-     """, (opportunity_id, description, quantity, activation_status, sequence_number))
+
+    query = """
+        INSERT INTO "Line_Items" (
+            "opportunity_ID",
+            line_item_description,
+            quantity,
+            activation_status,
+            line_item_sequence
+        )
+        VALUES (%s, %s, %s, %s, %s)
+    """
+
+    cursor.execute(query, (
+        opportunity_id,
+        description,
+        quantity,
+        activation_status,
+        sequence_number
+    ))
+
     conn.commit()
     conn.close()
 
@@ -171,16 +240,26 @@ def add_line_item(opportunity_id, description, quantity, sequence_number, activa
 """HELPER FUNCTION TO UPDATE LINE ITEM DATA"""
 
 def update_line_item(line_id, description, quantity, activation_status, sequence_number):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE Line_Items
-        SET line_item_description = ?, 
-            quantity = ?, 
-            activation_status = ?, 
-            line_item_sequence = ?
-        WHERE line_ID = ?
-    """, (description, quantity, activation_status, sequence_number, line_id))
+
+    query = """
+        UPDATE "Line_Items"
+        SET line_item_description = %s,
+            quantity = %s,
+            activation_status = %s,
+            line_item_sequence = %s
+        WHERE "line_ID" = %s
+    """
+
+    cursor.execute(query, (
+        description,
+        quantity,
+        activation_status,
+        sequence_number,
+        line_id
+    ))
+
     conn.commit()
     conn.close()
 
@@ -192,25 +271,28 @@ def update_line_item_totals(line_id):
     """
     Recalculate unit_cost and unit_price for a line item based on its components
     """
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Sum all component costs
+    # Sum all component costs and prices
     cursor.execute("""
         SELECT SUM(unit_cost), SUM(unit_price)
-        FROM Components
-        WHERE line_ID = ?
+        FROM "Components"
+        WHERE "line_ID" = %s
     """, (line_id,))
     row = cursor.fetchone()
+
     total_cost = row[0] or 0
     total_price = row[1] or 0
 
     # Update Line_Items table
     cursor.execute("""
-        UPDATE Line_Items
-        SET unit_cost = ?, unit_price = ?
-        WHERE line_ID = ?
+        UPDATE "Line_Items"
+        SET unit_cost = %s,
+            unit_price = %s
+        WHERE "line_ID" = %s
     """, (total_cost, total_price, line_id))
+
     conn.commit()
     conn.close()
 
@@ -219,15 +301,18 @@ def update_line_item_totals(line_id):
 """HELPER FUNCTION TO GET THE OPPORTUNITY_ID FROM A LINE_ID"""
 
 def get_opportunity_id_by_line(line_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        SELECT opportunity_ID
-        FROM Line_Items
-        WHERE line_ID = ?
+        SELECT "opportunity_ID"
+        FROM "Line_Items"
+        WHERE "line_ID" = %s
     """, (line_id,))
+
     row = cursor.fetchone()
     conn.close()
+
     return row[0] if row else None
 
 ########################################################################################################################
@@ -235,19 +320,32 @@ def get_opportunity_id_by_line(line_id):
 """HELPER FUNCTION TO GET COMPONENT DATA"""
 
 def get_components(line_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     query = """
-        SELECT component_ID, line_ID, component_type_ID, quantity, 
-               unit_cost, unit_price, factor1, factor2, factor3, factor4, factor5
-        FROM Components
-        WHERE line_ID = ?
-        ORDER BY component_ID
+        SELECT 
+            "component_ID",
+            "line_ID",
+            "component_type_ID",
+            quantity,
+            unit_cost,
+            unit_price,
+            factor1,
+            factor2,
+            factor3,
+            factor4,
+            factor5
+        FROM "Components"
+        WHERE "line_ID" = %s
+        ORDER BY "component_ID"
     """
+
     cursor.execute(query, (line_id,))
-    rows = cursor.fetchall()
+    results = cursor.fetchall()  # already a list of dicts
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
@@ -255,17 +353,29 @@ def get_components(line_id):
 
 def insert_component(line_id, component_type_id):
     try:
-        conn = pyodbc.connect(CONN_STR)
+        conn = get_db_connection()
         cursor = conn.cursor()
+
         cursor.execute("""
-            INSERT INTO Components
-            (line_ID, component_type_ID, quantity, unit_cost, unit_price,
-             factor1, factor2, factor3, factor4, factor5, factor6)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (line_id, component_type_id, 1, 0, 0, 0, 0, 0, 0, 0, 0))
+            INSERT INTO "Components" (
+                "line_ID", "component_type_ID", quantity, unit_cost, unit_price,
+                factor1, factor2, factor3, factor4, factor5, factor6
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            line_id,
+            component_type_id,
+            1,  # quantity default
+            0,  # unit_cost
+            0,  # unit_price
+            0, 0, 0, 0, 0, 0  # factor1-6
+        ))
+
         conn.commit()
+
     except Exception as e:
         print("Error inserting component:", e)
+
     finally:
         conn.close()
 
@@ -274,83 +384,97 @@ def insert_component(line_id, component_type_id):
 """HELPER FUNCTION TO GET COMPONENT TYPES DATA"""
 
 def get_component_types():
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     query = """
-        SELECT [component_type_ID], [component_types_description]
-        FROM [Component_Types]
-        ORDER BY [component_types_description]
+        SELECT 
+            "component_type_ID",
+            component_types_description
+        FROM "Component_Types"
+        ORDER BY component_types_description
     """
+
     cursor.execute(query)
-    rows = cursor.fetchall()
+    results = cursor.fetchall()
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO UPDATE COMPONENT TOTALS (unit_cost & unit_price)"""
 
 def update_component_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Get line_id from the component
     cursor.execute("""
-        SELECT line_ID
-        FROM Components
-        WHERE component_ID = ?
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
     line_id = row[0] if row else None
 
+    # Default if not found
     opportunity_id = None
     tax_type = None
 
+    # 2. Get opportunity_id from the line item
     if line_id is not None:
         cursor.execute("""
-            SELECT opportunity_ID
-            FROM Line_Items
-            WHERE line_ID = ?
+            SELECT "opportunity_ID"
+            FROM "Line_Items"
+            WHERE "line_ID" = %s
         """, (line_id,))
         row = cursor.fetchone()
         opportunity_id = row[0] if row else None
 
+    # 3. Get tax_type from the opportunity
     if opportunity_id is not None:
         cursor.execute("""
             SELECT tax_type
-            FROM Opportunities
-            WHERE opportunity_ID = ?
+            FROM "Opportunities"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
         row = cursor.fetchone()
         tax_type = row[0] if row else None
 
+    # 4. Calculate material total
     cursor.execute("""
         SELECT SUM(cm.quantity * m.material_price)
-        FROM component_MFG_Materials cm
-        INNER JOIN Materials m ON cm.material_ID = m.material_ID
-        WHERE cm.component_ID = ?
+        FROM "component_MFG_Materials" cm
+        INNER JOIN "Materials" m ON cm."material_ID" = m."material_ID"
+        WHERE cm."component_ID" = %s
     """, (component_id,))
     material_total = cursor.fetchone()[0] or 0
 
+    # 5. Calculate labor total
     cursor.execute("""
         SELECT SUM(cl.quantity * l.burden_rate)
-        FROM component_MFG_Labor cl
-        INNER JOIN Labor_Types l ON cl.labor_ID = l.labor_ID
-        WHERE cl.component_ID = ?
+        FROM "component_MFG_Labor" cl
+        INNER JOIN "Labor_Types" l ON cl."labor_ID" = l."labor_ID"
+        WHERE cl."component_ID" = %s
     """, (component_id,))
     labor_total = cursor.fetchone()[0] or 0
 
+    # 6. Compute unit_cost
     unit_cost = float(material_total) + float(labor_total)
 
+    # 7. Compute unit_price based on tax_type
     if tax_type != "New Construction":
-        unit_price = float(material_total) * float(2.23) + float(labor_total) * float(3.62)
-
+        unit_price = float(material_total) * 2.23 + float(labor_total) * 3.62
     else:
-        unit_price = float(material_total) * float(2.23) * float(1.093325) + float(labor_total) * float(3.62)
+        unit_price = float(material_total) * 2.23 * 1.093325 + float(labor_total) * 3.62
 
+    # 8. Update component totals
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?, unit_price = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s,
+            unit_price = %s
+        WHERE "component_ID" = %s
     """, (unit_cost, unit_price, component_id))
 
     conn.commit()
@@ -369,54 +493,70 @@ def update_component_totals(component_id):
 """HELPER FUNCTION TO GET MATERIALS DATA"""
 
 def get_materials():
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        SELECT material_ID, material_description, material_price, material_unit, stock
-        FROM Materials
-        WHERE stock='YES'
+        SELECT 
+            "material_ID",
+            material_description,
+            material_price,
+            material_unit,
+            stock
+        FROM "Materials"
+        WHERE stock = 'YES'
         ORDER BY material_description
     """
+
     cursor.execute(query)
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [col[0] for col in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO GET COMPONENT MATERIAL DATA"""
 
 def get_component_materials(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT
-            cm.[ID],
-            cm.[component_ID],
-            cm.[material_ID],
-            cm.[quantity],
-            m.[material_description],
-            m.[material_unit],
-            m.[material_price]
-        FROM [component_MFG_Materials] AS cm
-        INNER JOIN [Materials] AS m
-            ON cm.[material_ID] = m.[material_ID]
-        WHERE cm.[component_ID] = ?
-        ORDER BY cm.[ID]
+            cm."ID",
+            cm."component_ID",
+            cm."material_ID",
+            cm.quantity,
+            m.material_description,
+            m.material_unit,
+            m.material_price
+        FROM "component_MFG_Materials" cm
+        INNER JOIN "Materials" m
+            ON cm."material_ID" = m."material_ID"
+        WHERE cm."component_ID" = %s
+        ORDER BY cm."ID"
     """, (component_id,))
+
     rows = cursor.fetchall()
     conn.close()
 
     results = []
     for r in rows:
         results.append({
-            "ID": r.ID,
-            "material_ID": r.material_ID,
-            "material_description": r.material_description,
-            "material_unit": r.material_unit,
-            "material_price": float(r.material_price or 0),
-            "quantity": float(r.quantity or 0)
+            "ID": r[0],
+            "component_ID": r[1],
+            "material_ID": r[2],
+            "quantity": float(r[3] or 0),
+            "material_description": r[4],
+            "material_unit": r[5],
+            "material_price": float(r[6] or 0)
         })
+
     return results
 
 ########################################################################################################################
@@ -424,13 +564,20 @@ def get_component_materials(component_id):
 """HELPER FUNCTION TO ADD MATERIALS TO A COMPONENT"""
 
 def add_component_material(component_id, material_id, quantity):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        INSERT INTO Component_Materials (component_ID, material_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_MFG_Materials" (
+            "component_ID",
+            "material_ID",
+            quantity
+        )
+        VALUES (%s, %s, %s)
     """
+
     cursor.execute(query, (component_id, material_id, quantity))
+
     conn.commit()
     conn.close()
 
@@ -439,50 +586,62 @@ def add_component_material(component_id, material_id, quantity):
 """HELPER FUNCTION TO GET LABOR TYPES DATA"""
 
 def get_labor_types():
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        SELECT labor_ID, labor_type, burden_rate
-        FROM Labor_Types
-        ORDER BY labor_ID
+        SELECT 
+            "labor_ID",
+            labor_type,
+            burden_rate
+        FROM "Labor_Types"
+        ORDER BY "labor_ID"
     """
+
     cursor.execute(query)
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [col[0] for col in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO GET COMPONENT LABOR DATA"""
 
 def get_component_labor(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT
-            cl.[line_item_labor_ID],
-            cl.[component_ID],
-            cl.[labor_ID],
-            cl.[quantity],
-            l.[labor_type],
-            l.[burden_rate]
-        FROM [component_MFG_Labor] AS cl
-        INNER JOIN [Labor_Types] AS l
-            ON cl.[labor_ID] = l.[labor_ID]
-        WHERE cl.[component_ID] = ?
-        ORDER BY cl.[line_item_labor_ID]
+            cl."line_item_labor_ID",
+            cl."component_ID",
+            cl."labor_ID",
+            cl.quantity,
+            l.labor_type,
+            l.burden_rate
+        FROM "component_MFG_Labor" cl
+        INNER JOIN "Labor_Types" l
+            ON cl."labor_ID" = l."labor_ID"
+        WHERE cl."component_ID" = %s
+        ORDER BY cl."line_item_labor_ID"
     """, (component_id,))
+
     rows = cursor.fetchall()
     conn.close()
 
     results = []
     for r in rows:
         results.append({
-            "line_item_labor_ID": r.line_item_labor_ID,
-            "labor_ID": r.labor_ID,
-            "labor_type": r.labor_type,
-            "burden_rate": float(r.burden_rate or 0),
-            "quantity": float(r.quantity or 0)
+            "line_item_labor_ID": r[0],
+            "labor_ID": r[2],
+            "labor_type": r[4],
+            "burden_rate": float(r[5] or 0),
+            "quantity": float(r[3] or 0)
         })
     return results
 
@@ -491,13 +650,20 @@ def get_component_labor(component_id):
 """HELPER FUNCTION TO ADD LABOR TO A COMPONENT"""
 
 def add_component_labor(component_id, labor_id, quantity):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     query = """
-        INSERT INTO Component_Labor (component_ID, labor_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_MFG_Labor" (
+            "component_ID",
+            "labor_ID",
+            quantity
+        )
+        VALUES (%s, %s, %s)
     """
+
     cursor.execute(query, (component_id, labor_id, quantity))
+
     conn.commit()
     conn.close()
 
@@ -506,24 +672,26 @@ def add_component_labor(component_id, labor_id, quantity):
 """ HELPER FUNCTION THAT UPDATES THE LINE ITEM UNIT PRICE AS THE SUM OF THE COMPONENT TOTALS"""
 
 def update_line_item_totals_from_components(line_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Sum all component subtotals for this line item
     cursor.execute("""
         SELECT SUM(c.unit_price * c.quantity) AS total_price
-        FROM Components c
-        WHERE c.line_ID = ?
+        FROM "Components" c
+        WHERE c."line_ID" = %s
     """, (line_id,))
-    row = cursor.fetchone()
-    total_price = float(row.total_price or 0)
 
-    # Update line item
+    row = cursor.fetchone()
+    total_price = float(row[0] or 0)
+
+    # Update line item price
     cursor.execute("""
-        UPDATE Line_Items
-        SET unit_price = ?
-        WHERE line_ID = ?
+        UPDATE "Line_Items"
+        SET unit_price = %s
+        WHERE "line_ID" = %s
     """, (total_price, line_id))
+
     conn.commit()
     conn.close()
 
@@ -532,12 +700,19 @@ def update_line_item_totals_from_components(line_id):
 """HELPER FUNCTION TO GET ALL COMPONENTS THAT BELONG TO A SPECIFIC LINE ITEM"""
 
 def get_line_id_by_component(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT line_ID FROM Components WHERE component_ID = ?", (component_id,))
+
+    cursor.execute("""
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID" = %s
+    """, (component_id,))
+
     row = cursor.fetchone()
     conn.close()
-    return row.line_ID if row else None
+
+    return row[0] if row else None
 
 ########################################################################################################################
 ########################################################################################################################
@@ -552,82 +727,110 @@ def get_line_id_by_component(component_id):
 """HELPER FUNCTION TO GET INSTALL LABOR TYPES DATA"""
 
 def get_install_labor_types():
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT install_labor_ID, install_labor_type, burden_rate FROM Install_Labor_Types ORDER BY install_labor_type")
+
+    cursor.execute("""
+        SELECT 
+            "install_labor_ID",
+            install_labor_type,
+            burden_rate
+        FROM "Install_Labor_Types"
+        ORDER BY install_labor_type
+    """)
+
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [col[0] for col in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO GET COMPONENT INSTALL LABOR DATA"""
 
 def get_component_install_materials(component_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     cursor.execute("""
         SELECT 
-            cim.[component_install_materials_ID] AS ID,
-            cim.[component_ID],
-            cim.[quantity],
-            cim.[unit_cost],
-            cim.[material_description],
-            cim.[material_unit]
-        FROM [component_install_Materials] AS cim
-        WHERE cim.[component_ID] = ?
-        ORDER BY cim.[component_install_materials_ID]
+            cim."component_install_materials_ID" AS id,
+            cim."component_ID",
+            cim.quantity,
+            cim.unit_cost,
+            cim.material_description,
+            cim.material_unit
+        FROM "component_install_Materials" cim
+        WHERE cim."component_ID" = %s
     """, (component_id,))
-    rows = cursor.fetchall()
+
+    return cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [col[0] for col in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO GET COMPONENT INSTALL MATERIAL DATA"""
 
 def get_component_install_labor(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT 
-            cil.[component_install_labor_ID] AS ID,
-            cil.[component_ID],
-            cil.[install_labor_ID],
-            cil.[quantity],
-            ilt.[install_labor_type],
-            ilt.[burden_rate]
-        FROM [component_install_Labor] AS cil
-        INNER JOIN [Install_Labor_Types] AS ilt
-            ON cil.[install_labor_ID] = ilt.[install_labor_ID]
-        WHERE cil.[component_ID] = ?
-        ORDER BY cil.[component_install_labor_ID];
+            cil."component_install_labor_ID" AS id,
+            cil."component_ID",
+            cil."install_labor_ID",
+            cil.quantity,
+            ilt.install_labor_type,
+            ilt.burden_rate
+        FROM "component_install_Labor" cil
+        INNER JOIN "Install_Labor_Types" ilt
+            ON cil."install_labor_ID" = ilt."install_labor_ID"
+        WHERE cil."component_ID" = %s
+        ORDER BY cil."component_install_labor_ID"
     """, (component_id,))
+
     rows = cursor.fetchall()
+
+    # Convert tuple rows → dict rows
+    column_names = [col[0] for col in cursor.description]
+    results = [dict(zip(column_names, row)) for row in rows]
+
     conn.close()
-    return rows
+    return results
 
 ########################################################################################################################
 
 """HELPER FUNCTION TO UPDATE THE COMPONENT UNIT COST"""
 
 def update_component_unit_cost(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Get material cost for this component
     cursor.execute("""
         SELECT SUM(quantity * unit_price)
-        FROM component_install_materials
-        WHERE component_ID = ?
+        FROM "component_install_Materials"
+        WHERE "component_ID" = %s
     """, (component_id,))
 
     total_material_cost = cursor.fetchone()[0] or 0
 
+    # 2. Update component cost
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s
+        WHERE "component_ID" = %s
     """, (total_material_cost, component_id))
 
     conn.commit()
@@ -638,13 +841,14 @@ def update_component_unit_cost(component_id):
 """HELPER FUNCTION TO UPDATE INSTALL COMPONENT TOTAL COST AND PRICE"""
 
 def update_install_component_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Get line_id from the component
     cursor.execute("""
-        SELECT line_ID
-        FROM Components
-        WHERE component_ID = ?
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
     line_id = row[0] if row else None
@@ -652,98 +856,121 @@ def update_install_component_totals(component_id):
     opportunity_id = None
     tax_type = None
 
+    # 2. Get opportunity_id from the line item
     if line_id is not None:
         cursor.execute("""
-            SELECT opportunity_ID
-            FROM Line_Items
-            WHERE line_ID = ?
+            SELECT "opportunity_ID"
+            FROM "Line_Items"
+            WHERE "line_ID" = %s
         """, (line_id,))
         row = cursor.fetchone()
         opportunity_id = row[0] if row else None
 
+    # 3. Get tax_type from the opportunity
     if opportunity_id is not None:
         cursor.execute("""
             SELECT tax_type
-            FROM Opportunities
-            WHERE opportunity_ID = ?
+            FROM "Opportunities"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
         row = cursor.fetchone()
         tax_type = row[0] if row else None
 
+    # 4. Material total
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
-        FROM component_install_Materials
-        WHERE component_ID = ?
+        FROM "component_install_Materials"
+        WHERE "component_ID" = %s
     """, (component_id,))
     material_total = cursor.fetchone()[0] or 0
 
+    # 5. Labor total (corrected query)
     cursor.execute("""
         SELECT SUM(ci.quantity * ilt.burden_rate)
-        FROM component_install_Labor ci
-        INNER JOIN Install_Labor_Types ilt 
-            ON ci.install_labor_ID = ilt.install_labor_ID
-        WHERE ci.component_ID = ?
+        FROM "component_install_Labor" ci
+        INNER JOIN "Install_Labor_Types" ilt
+            ON ci."install_labor_ID" = ilt."install_labor_ID"
+        WHERE ci."component_ID" = %s
     """, (component_id,))
     labor_total = cursor.fetchone()[0] or 0
 
+    # 6. Subcontractor total
     cursor.execute("""
         SELECT SUM(subcontractor_cost)
         FROM subcontractor_install_cost
-        WHERE component_ID = ?
+        WHERE "component_ID" = %s
     """, (component_id,))
     subcontract_total = cursor.fetchone()[0] or 0
 
+    # 7. Final unit cost
     unit_cost = float(material_total) + float(labor_total) + float(subcontract_total)
 
+    # 8. Final unit price
     if tax_type != "New Construction":
         unit_price = (
-        float(material_total) * 1.45 +
-        float(labor_total) * 1.32 +
-        float(subcontract_total) * 1.32
+            float(material_total) * 1.45 +
+            float(labor_total) * 1.32 +
+            float(subcontract_total) * 1.32
         )
-
     else:
         unit_price = (
-                float(material_total) * 1.45 * 1.093325 +
-                float(labor_total) * 1.32 +
-                float(subcontract_total) * 1.32
+            float(material_total) * 1.45 * 1.093325 +
+            float(labor_total) * 1.32 +
+            float(subcontract_total) * 1.32
         )
 
+    # 9. Update component totals
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?, unit_price = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s, unit_price = %s
+        WHERE "component_ID" = %s
     """, (unit_cost, unit_price, component_id))
 
     conn.commit()
     conn.close()
 
-
 ########################################################################################################################
 
+"""HELPER FUNCTION TO GET SUBCONTRACTOR INSTALL COSTS"""
+
 def get_subcontract_install_costs(component_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     cursor.execute("""
-        SELECT subcontracted_install_labor_ID, component_ID, subcontractor_cost
-        FROM subcontractor_install_cost
-        WHERE component_ID = ?
+        SELECT 
+            sic."subcontractor_install_labor_ID" AS id,
+            sic."component_ID",
+            sic.subcontractor_cost
+        FROM subcontractor_install_cost sic
+        WHERE sic."component_ID" = %s
     """, (component_id,))
+
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 ########################################################################################################################
 
+"""HELPER FUNCTION TO ADD SUBCONTRACTOR INSTALL COSTS"""
+
 def add_subcontract_install_cost(component_id, cost):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO subcontractor_install_cost (component_ID, subcontractor_cost)
-        VALUES (?, ?)
+        INSERT INTO subcontractor_install_cost (
+            "component_ID",
+            subcontractor_cost
+        )
+        VALUES (%s, %s)
+        RETURNING "subcontractor_install_labor_ID"
     """, (component_id, cost))
+
+    new_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
+    return new_id
 
 ########################################################################################################################
 ########################################################################################################################
@@ -759,21 +986,23 @@ def add_subcontract_install_cost(component_id, cost):
 
 def get_component_emc(component_id):
     """Return all EMC units for a given component as dicts for Jinja rendering."""
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT
-            EMC_unit_ID AS ID,
-            component_ID,
+            "EMC_unit_ID" AS id,
+            "component_ID",
             quantity,
             unit_cost,
-            EMC_description
-        FROM Component_EMC
-        WHERE component_ID = ?
-        ORDER BY EMC_unit_ID
+            "EMC_description"
+        FROM "component_EMC"
+        WHERE "component_ID" = %s
+        ORDER BY "EMC_unit_ID"
     """, (component_id,))
 
-    columns = [col[0] for col in cursor.description]
+    # psycopg2 returns list of tuples → convert to list of dicts
+    columns = [desc[0] for desc in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     conn.close()
@@ -784,13 +1013,14 @@ def get_component_emc(component_id):
 """HELPER FUNCTION TO UPDATE EMC PRICE"""
 
 def update_emc_component_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Get line_id from the component
     cursor.execute("""
-        SELECT line_ID
-        FROM Components
-        WHERE component_ID = ?
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
     line_id = row[0] if row else None
@@ -798,43 +1028,48 @@ def update_emc_component_totals(component_id):
     opportunity_id = None
     tax_type = None
 
+    # 2. Get opportunity_id from line item
     if line_id is not None:
         cursor.execute("""
-            SELECT opportunity_ID
-            FROM Line_Items
-            WHERE line_ID = ?
+            SELECT "opportunity_ID"
+            FROM "Line_Items"
+            WHERE "line_ID" = %s
         """, (line_id,))
         row = cursor.fetchone()
         opportunity_id = row[0] if row else None
 
+    # 3. Get tax_type from opportunity
     if opportunity_id is not None:
         cursor.execute("""
             SELECT tax_type
-            FROM Opportunities
-            WHERE opportunity_ID = ?
+            FROM "Opportunities"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
         row = cursor.fetchone()
         tax_type = row[0] if row else None
 
+    # 4. Sum cost from Component_EMC entries for this component
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
-        FROM component_EMC
-        WHERE component_ID = ?
+        FROM "component_EMC"
+        WHERE "component_ID" = %s
     """, (component_id,))
     total_cost = cursor.fetchone()[0] or 0
 
     unit_cost = float(total_cost)
 
+    # 5. Compute unit_price
     if tax_type != "New Construction":
         unit_price = unit_cost * 1.315
-
     else:
         unit_price = unit_cost * 1.315 * 1.093325
 
+    # 6. Update the component totals
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?, unit_price = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s,
+            unit_price = %s
+        WHERE "component_ID" = %s
     """, (unit_cost, unit_price, component_id))
 
     conn.commit()
@@ -853,21 +1088,25 @@ def update_emc_component_totals(component_id):
 """HELPER FUNCTION TO GET PIPE AND FOUNDATION DATA"""
 
 def get_component_pipe_foundation(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        SELECT component_pipe_and_foundation_ID, component_ID,
-               base_pipe_diameter, base_pipe_footage,
-               stack_pipe1_diameter, stack_pipe1_footage,
-               stack_pipe2_diameter, stack_pipe2_footage,
-               stack_pipe3_diameter, stack_pipe3_footage,
-               stack_pipe4_diameter, stack_pipe4_footage,
-               pier_diameter, pier_depth, pier_quantity,
-               rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
-               digging_cost, concrete_cost, additional_footer_cost, pipe_cost
-        FROM component_pipe_and_foundation
-        WHERE component_ID = ?
+        SELECT 
+            "component_pipe_and_foundation_ID",
+            "component_ID",
+            base_pipe_diameter, base_pipe_footage,
+            stack_pipe1_diameter, stack_pipe1_footage,
+            stack_pipe2_diameter, stack_pipe2_footage,
+            stack_pipe3_diameter, stack_pipe3_footage,
+            stack_pipe4_diameter, stack_pipe4_footage,
+            pier_diameter, pier_depth, pier_quantity,
+            rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
+            digging_cost, concrete_cost, additional_footer_cost, pipe_cost
+        FROM "component_pipe_and_foundation"
+        WHERE "component_ID" = %s
     """, (component_id,))
+
     row = cursor.fetchone()
     conn.close()
     return row
@@ -877,13 +1116,14 @@ def get_component_pipe_foundation(component_id):
 """HELPER FUNCTION TO UPDATE PIPE AND FOUNDATION PRICE"""
 
 def update_pipe_foundation_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Get line_id from the component
     cursor.execute("""
-        SELECT line_ID
-        FROM Components
-        WHERE component_ID = ?
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
     line_id = row[0] if row else None
@@ -891,47 +1131,57 @@ def update_pipe_foundation_totals(component_id):
     opportunity_id = None
     tax_type = None
 
+    # 2. Get opportunity_id from line item
     if line_id is not None:
         cursor.execute("""
-            SELECT opportunity_ID
-            FROM Line_Items
-            WHERE line_ID = ?
+            SELECT "opportunity_ID"
+            FROM "Line_Items"
+            WHERE "line_ID" = %s
         """, (line_id,))
         row = cursor.fetchone()
         opportunity_id = row[0] if row else None
 
+    # 3. Get tax_type from opportunity
     if opportunity_id is not None:
         cursor.execute("""
             SELECT tax_type
-            FROM Opportunities
-            WHERE opportunity_ID = ?
+            FROM "Opportunities"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
         row = cursor.fetchone()
         tax_type = row[0] if row else None
 
+    # 4. Pull pipe foundation cost fields
     cursor.execute("""
-        SELECT digging_cost, concrete_cost, additional_footer_costs, pipe_cost
-        FROM component_pipe_and_foundation
-        WHERE component_ID = ?
+        SELECT digging_cost, concrete_cost, additional_footer_cost, pipe_cost
+        FROM "component_pipe_and_foundation"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
 
     if row:
         digging, concrete, additional, pipe = [float(v or 0) for v in row]
+
+        # 5. Compute costs
         material_unit_cost = concrete + pipe
         labor_unit_cost = digging + additional
         unit_cost = material_unit_cost + labor_unit_cost
 
+        # 6. Compute selling price
         if tax_type != "New Construction":
             unit_price = unit_cost * 1.35
-
         else:
-            unit_price = material_unit_cost * 1.35 * 1.093325 + labor_unit_cost * 1.35
+            unit_price = (
+                material_unit_cost * 1.35 * 1.093325 +
+                labor_unit_cost * 1.35
+            )
 
+        # 7. Update the component totals
         cursor.execute("""
-            UPDATE Components
-            SET unit_cost = ?, unit_price = ?
-            WHERE component_ID = ?
+            UPDATE "Components"
+            SET unit_cost = %s,
+                unit_price = %s
+            WHERE "component_ID" = %s
         """, (unit_cost, unit_price, component_id))
 
     conn.commit()
@@ -950,14 +1200,21 @@ def update_pipe_foundation_totals(component_id):
 """HELPER FUNCTION TO GET MASONRY DATA"""
 
 def get_component_masonry(component_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     cursor.execute("""
-        SELECT component_masonry_ID, component_ID, quantity, unit_cost, masonry_description
-        FROM component_Masonry
-        WHERE component_ID = ?
-        ORDER BY component_masonry_ID
+        SELECT 
+            "component_masonry_ID" AS id,
+            "component_ID",
+            quantity,
+            unit_cost,
+            masonry_description
+        FROM "component_Masonry"
+        WHERE "component_ID" = %s
+        ORDER BY "component_masonry_ID"
     """, (component_id,))
+
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -967,23 +1224,25 @@ def get_component_masonry(component_id):
 """HELPER FUNCTION TO UPDATE MASONRY PRICE"""
 
 def update_masonry_component_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. Sum material cost for this component
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
-        FROM component_Masonry
-        WHERE component_ID = ?
+        FROM "component_Masonry"
+        WHERE "component_ID" = %s
     """, (component_id,))
     total_cost = cursor.fetchone()[0] or 0
 
     unit_cost = float(total_cost)
     unit_price = unit_cost * 1.35
 
+    # 2. Update the component record
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?, unit_price = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s, unit_price = %s
+        WHERE "component_ID" = %s
     """, (unit_cost, unit_price, component_id))
 
     conn.commit()
@@ -1002,14 +1261,21 @@ def update_masonry_component_totals(component_id):
 """HELPER FUNCTION TO GET RENTAL EQUIPMENT DATA"""
 
 def get_component_rental_equipment(component_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     cursor.execute("""
-        SELECT component_equipment_ID, component_ID, quantity, unit_cost, equipment_description
-        FROM component_Rental_Equipment
-        WHERE component_ID = ?
-        ORDER BY component_equipment_ID
+        SELECT 
+            "component_equipment_ID" AS id,
+            "component_ID",
+            quantity,
+            unit_cost,
+            equipment_description
+        FROM "component_Rental_Equipment"
+        WHERE "component_ID" = %s
+        ORDER BY "component_equipment_ID"
     """, (component_id,))
+
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -1019,23 +1285,25 @@ def get_component_rental_equipment(component_id):
 """HELPER FUNCTION TO UPDATE RENTAL EQUIPMENT PRICE"""
 
 def update_rental_equipment_component_totals(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # Calculate total cost for rental equipment
     cursor.execute("""
         SELECT SUM(quantity * unit_cost)
-        FROM component_Rental_Equipment
-        WHERE component_ID = ?
+        FROM "component_Rental_Equipment"
+        WHERE "component_ID" = %s
     """, (component_id,))
     total_cost = cursor.fetchone()[0] or 0
 
     unit_cost = float(total_cost)
     unit_price = unit_cost * 1.35
 
+    # Update the component's totals
     cursor.execute("""
-        UPDATE Components
-        SET unit_cost = ?, unit_price = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET unit_cost = %s, unit_price = %s
+        WHERE "component_ID" = %s
     """, (unit_cost, unit_price, component_id))
 
     conn.commit()
@@ -1057,12 +1325,14 @@ def requires_role(*allowed_roles):
 
     return decorator
 
+
 def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "employee_ID" not in session:
             return redirect(url_for("login_route"))
         return f(*args, **kwargs)
+
     return wrapper
 
 ########################################################################################################################
@@ -2292,6 +2562,7 @@ function findInstallers() {
 function closeInstallersPopup() {
   document.getElementById("installersPopup").style.display = "none";
 }
+
 </script>
 
 <script>
@@ -2509,53 +2780,22 @@ QUOTE_CUSTOM_SIGN = """
     </table>
 </div>
 
-<!-- Back Navigation (Customer / Opportunity / Home Safe) -->
-{% set has_customer = customer_id is defined and customer_id not in (None, "None", "", 0) %}
-{% set has_opportunity = opportunity_id is defined and opportunity_id not in (None, "None", "", 0) %}
+{# Treat only real integers > 0 as valid IDs #}
+{% set valid_customer = customer_id is number and customer_id|int > 0 %}
+{% set valid_opportunity = opportunity_id is number and opportunity_id|int > 0 %}
 
-{% if has_customer %}
-    <br>
-    <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}">
-        ⬅ Back to Customer Details
-    </a>
+{% if valid_opportunity %}
+  <a href="{{ url_for('show_opportunity_route', opportunity_id=opportunity_id|int) }}?show_popup=true&line_id={{ line_id }}">
+    ⬅ Back to Line Items
+  </a>
 
-{% elif has_opportunity %}
-    <br>
-    {% set opp_id_safe = opportunity_id|int %}
-    <a id="backToLineItems"
-       href="{{ url_for('show_opportunity_route', opportunity_id=opp_id_safe) }}?show_popup=true&line_id={{ line_id }}">
-        ⬅ Back to Line Items
-    </a>
-
-    <script>
-      document.addEventListener("DOMContentLoaded", () => {
-          if (document.getElementById("material_id")) {
-              new TomSelect("#material_id", {
-                  create: false,
-                  sortField: { field: "text", direction: "asc" }
-              });
-          }
-
-          const btn = document.getElementById("backToLineItems");
-          if (btn) {
-              btn.addEventListener("click", async (e) => {
-                  e.preventDefault();
-                  try {
-                      await fetch(`/line_item/{{ line_id }}/update_price_from_components`, { method: "POST" });
-                  } catch (err) {
-                      console.warn("Update failed:", err);
-                  }
-                  window.location.href = "{{ url_for('show_opportunity_route', opportunity_id=opp_id_safe) }}?show_popup=true&line_id={{ line_id }}";
-              });
-          }
-      });
-    </script>
+{% elif valid_customer %}
+  <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}?show_popup=true&line_id={{ line_id }}">
+    ⬅ Back to Customer
+  </a>
 
 {% else %}
-    <br>
-    <a href="{{ url_for('index') }}">
-        ⬅ Back to Home
-    </a>
+  <a href="{{ url_for('index') }}">⬅ Back to Home</a>
 {% endif %}
 
 </body>
@@ -2677,7 +2917,7 @@ QUOTE_INSTALLATION = """
                     <td>{{ m.material_description }}</td>
                     <td>{{ m.material_unit }}</td>
                     <td>
-                        <input type="hidden" name="install_material_row_id[]" value="{{ m.ID }}">
+                        <input type="hidden" name="install_material_row_id[]" value="{{ m.id }}">
                         <input type="number" step="0.01" name="install_material_qty[]" value="{{ qty }}">
                     </td>
                     <td>${{ "%.2f"|format(price) }}</td>
@@ -2705,7 +2945,7 @@ QUOTE_INSTALLATION = """
                 <tr>
                     <td>{{ l.install_labor_type }}</td>
                     <td>
-                        <input type="hidden" name="install_labor_row_id[]" value="{{ l.ID }}">
+                        <input type="hidden" name="install_labor_row_id[]" value="{{ l.id }}">
                         <input type="number" step="0.01" name="install_labor_qty[]" value="{{ qty }}">
                     </td>
                     <td>${{ "%.2f"|format(rate) }}</td>
@@ -3468,20 +3708,21 @@ QUOTE_FACE_LIT_CHANNEL_LETTERS_COMPONENT = """
 {% set has_customer = customer_id is defined and customer_id not in (None, "None", "") %}
 {% set has_opportunity = opportunity_id is defined and opportunity_id not in (None, "None", "") %}
 
-{% if has_customer %}
-  <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}?show_popup=true&line_id={{ line_id }}">
-    ⬅ Back to Customer
-  </a>
-
-{% elif has_opportunity %}
+{% if has_opportunity %}
   {% set opp_id_safe = opportunity_id|int %}
   <a href="{{ url_for('show_opportunity_route', opportunity_id=opp_id_safe) }}?show_popup=true&line_id={{ line_id }}">
     ⬅ Back to Line Items
   </a>
 
+{% elif has_customer %}
+  <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}?show_popup=true&line_id={{ line_id }}">
+    ⬅ Back to Customer
+  </a>
+
 {% else %}
   <a href="{{ url_for('index') }}">⬅ Back to Home</a>
 {% endif %}
+
 </body>
 </html>
 """
@@ -3589,15 +3830,15 @@ QUOTE_REVERSE_LIT_CHANNEL_LETTERS_COMPONENT = """
 {% set has_customer = customer_id is defined and customer_id not in (None, "None", "") %}
 {% set has_opportunity = opportunity_id is defined and opportunity_id not in (None, "None", "") %}
 
-{% if has_customer %}
-  <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}?show_popup=true&line_id={{ line_id }}">
-    ⬅ Back to Customer
-  </a>
-
-{% elif has_opportunity %}
+{% if has_opportunity %}
   {% set opp_id_safe = opportunity_id|int %}
   <a href="{{ url_for('show_opportunity_route', opportunity_id=opp_id_safe) }}?show_popup=true&line_id={{ line_id }}">
     ⬅ Back to Line Items
+  </a>
+
+{% elif has_customer %}
+  <a href="{{ url_for('customer_detail_route', customer_id=customer_id|int) }}?show_popup=true&line_id={{ line_id }}">
+    ⬅ Back to Customer
   </a>
 
 {% else %}
@@ -3902,7 +4143,7 @@ CONTRACT_TEMPLATE = """
             <li>Customer is to furnish all primary electrical service (120V UNLESS OTHERWISE AGREED) and connection to the sign BASE including: timers, photocells, switches, and/or other controls required by local city ordinances at Customers own expense.</li>
             <li>Installation portion of this estimate is based on adequate access to front and backside of the install area. Unforeseen obstacles may require additional charges.</li>
             <li>All private lines must be clearly marked by the customer (such as sprinkler systems and ground lighting). Any damage to private lines not clearly marked is the responsibility of the customer.</li>
-            <li>Projects that are "NEW CONSTRUCTION" are taxed on the cost of materials only. Taxes are charged and itemized as a pass-through item to the customer. The final invoice is the controlling element of this contract (labor and materials separated on invoice).</li>
+            <li>For projects classified as new construction under Texas tax law, applicable taxes on materials are included in the contract price. Labor is non-taxable. The total contract amount shown in this proposal is an all-inclusive price covering all required materials, labor, and applicable taxes.</li>
             <li>All shipping quotes expire after 60 days. Any price differences billed on final invoice.</li>
             <li>FSG imposes a 3% surcharge on credit cards, barring state laws, that is not greater than our cost of acceptance.</li>
         </ul>
@@ -4067,7 +4308,7 @@ def add_customer_route():
 
 @app.route("/customer/<int:customer_id>", methods=["GET", "POST"])
 def customer_detail_route(customer_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # ==============================================
@@ -4085,10 +4326,17 @@ def customer_detail_route(customer_id):
         contact_phone = request.form.get("phone")
 
         cursor.execute("""
-            UPDATE Customers
-            SET customer_name=?, customer_email=?, billing_address=?, billing_city=?, billing_state=?, billing_zip=?,
-                contact_first_name=?, contact_last_name=?, contact_phone=?
-            WHERE customer_ID=?
+            UPDATE "Customers"
+            SET customer_name = %s,
+                customer_email = %s,
+                billing_address = %s,
+                billing_city = %s,
+                billing_state = %s,
+                billing_zip = %s,
+                contact_first_name = %s,
+                contact_last_name = %s,
+                contact_phone = %s
+            WHERE "customer_ID" = %s
         """, (
             customer_name, customer_email, billing_address, billing_city, billing_state, billing_zip,
             contact_first_name, contact_last_name, contact_phone, customer_id
@@ -4096,32 +4344,37 @@ def customer_detail_route(customer_id):
         conn.commit()
 
     # ==============================================
-    # 2. Auto-update all line item unit prices
+    # 2. Auto-update all customer line item totals
     # ==============================================
-    cursor.execute("SELECT line_ID FROM Customer_Line_Items WHERE customer_ID=?", (customer_id,))
+    cursor.execute("""
+        SELECT "line_ID"
+        FROM "Customer_Line_Items"
+        WHERE "customer_ID" = %s
+    """, (customer_id,))
     line_ids = [row[0] for row in cursor.fetchall()]
 
     for line_id in line_ids:
-        # Compute total unit price from linked components
+        # Total price
         cursor.execute("""
             SELECT SUM(unit_price * quantity)
-            FROM Components
-            WHERE line_ID = ?
+            FROM "Components"
+            WHERE "line_ID" = %s
         """, (line_id,))
         total_price = cursor.fetchone()[0] or 0
 
-        # (Optional) Compute unit cost the same way
+        # Total cost
         cursor.execute("""
             SELECT SUM(unit_cost * quantity)
-            FROM Components
-            WHERE line_ID = ?
+            FROM "Components"
+            WHERE "line_ID" = %s
         """, (line_id,))
         total_cost = cursor.fetchone()[0] or 0
 
         cursor.execute("""
-            UPDATE Customer_Line_Items
-            SET unit_price = ?, unit_cost = ?
-            WHERE line_ID = ?
+            UPDATE "Customer_Line_Items"
+            SET unit_price = %s,
+                unit_cost = %s
+            WHERE "line_ID" = %s
         """, (total_price, total_cost, line_id))
 
     conn.commit()
@@ -4129,52 +4382,80 @@ def customer_detail_route(customer_id):
     # ==============================================
     # 3. Get Customer Record
     # ==============================================
-    cursor.execute("SELECT * FROM Customers WHERE customer_ID=?", (customer_id,))
-    customer = cursor.fetchone()
+    cursor.execute("""
+        SELECT *
+        FROM "Customers"
+        WHERE "customer_ID" = %s
+    """, (customer_id,))
+    customer_row = cursor.fetchone()
+    customer = dict(zip([col[0] for col in cursor.description], customer_row))
 
     # ==============================================
-    # 4. Get Opportunities
+    # 4. Get Opportunities (FIXED)
     # ==============================================
     cursor.execute("""
-        SELECT opportunity_ID, opportunity_name, opportunity_price, tax_rate,
+        SELECT "opportunity_ID", opportunity_name, opportunity_price, tax_rate,
                site_address, site_city, site_state, site_zip
-        FROM Opportunities
-        WHERE customer_ID=?
+        FROM "Opportunities"
+        WHERE "customer_ID" = %s
     """, (customer_id,))
-    opportunities = cursor.fetchall()
+
+    opp_rows = cursor.fetchall()
+    opp_cols = [col[0] for col in cursor.description]
+
+    opportunities = [dict(zip(opp_cols, row)) for row in opp_rows]
 
     # ==============================================
     # 5. Get Saved Customer Line Items + Components
     # ==============================================
     cursor.execute("""
-        SELECT line_ID, customer_ID, line_item_description, quantity, unit_cost, unit_price, line_item_sequence
-        FROM Customer_Line_Items
-        WHERE customer_ID=?
+        SELECT "line_ID", "customer_ID", line_item_description, quantity,
+               unit_cost, unit_price, line_item_sequence
+        FROM "Customer_Line_Items"
+        WHERE "customer_ID" = %s
         ORDER BY line_item_sequence
     """, (customer_id,))
     line_items = cursor.fetchall()
+    line_item_cols = [c[0] for c in cursor.description]
 
-    # Build line item dicts including their components
     items = []
     for li in line_items:
-        cursor2 = conn.cursor()
-        cursor2.execute("SELECT * FROM Components WHERE line_ID=?", (li.line_ID,))
-        components = [dict(zip([d[0] for d in cursor2.description], row)) for row in cursor2.fetchall()]
+        li_dict = dict(zip(line_item_cols, li))
 
-        li_dict = dict(zip([d[0] for d in cursor.description], li))
-        li_dict["components"] = components
+        cursor.execute("""
+            SELECT *
+            FROM "Components"
+            WHERE "line_ID" = %s
+        """, (li_dict["line_ID"],))
+        comp_rows = cursor.fetchall()
+        comp_cols = [c[0] for c in cursor.description]
+
+        li_dict["components"] = [
+            dict(zip(comp_cols, comp)) for comp in comp_rows
+        ]
+
         items.append(li_dict)
 
     # ==============================================
-    # 6. Get Component Types (for Add Component dropdown)
+    # 6. Component Types (FIXED)
     # ==============================================
-    cursor.execute("SELECT * FROM Component_Types ORDER BY component_types_description")
-    component_types = cursor.fetchall()
+    cursor.execute("""
+        SELECT *
+        FROM "Component_Types"
+        ORDER BY component_types_description
+    """)
+    ct_rows = cursor.fetchall()
+    ct_cols = [col[0] for col in cursor.description]
+
+    component_types = [
+        dict(zip(ct_cols, row))
+        for row in ct_rows
+    ]
 
     conn.close()
 
     # ==============================================
-    # 7. Render Full Template
+    # 7. Render Template
     # ==============================================
     return render_template_string(
         CUSTOMER_DETAIL_TEMPLATE,
@@ -4216,13 +4497,30 @@ def update_opportunity_route(opportunity_id):
     site_state = request.form.get("site_state")
     site_zip = request.form.get("site_zip")
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        UPDATE Opportunities
-        SET opportunity_name = ?, tax_rate = ?, tax_type = ?, site_address = ?, site_city = ?, site_state = ?, site_zip = ?
-        WHERE opportunity_ID = ?
-    """, (opportunity_name, tax_rate, tax_type, site_address, site_city, site_state, site_zip, opportunity_id))
+        UPDATE "Opportunities"
+        SET opportunity_name = %s,
+            tax_rate = %s,
+            tax_type = %s,
+            site_address = %s,
+            site_city = %s,
+            site_state = %s,
+            site_zip = %s
+        WHERE "opportunity_ID" = %s
+    """, (
+        opportunity_name,
+        tax_rate,
+        tax_type,
+        site_address,
+        site_city,
+        site_state,
+        site_zip,
+        opportunity_id
+    ))
+
     conn.commit()
     conn.close()
 
@@ -4234,74 +4532,92 @@ def update_opportunity_route(opportunity_id):
 
 @app.route("/opportunity/<int:opportunity_id>")
 def show_opportunity_route(opportunity_id):
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
 
-    # ✅ STEP 1: Create or replace a temp table for component totals
-    try:
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # ============================================================
+    # STEP 1: Recalculate ALL line item totals for this opportunity
+    # ============================================================
+
+    cursor.execute("""
+        SELECT "line_ID"
+        FROM "Line_Items"
+        WHERE "opportunity_ID" = %s
+    """, (opportunity_id,))
+    line_ids = [row["line_ID"] for row in cursor.fetchall()]
+
+    for line_id in line_ids:
+
+        # Calculate component-driven total
         cursor.execute("""
-            SELECT C.line_ID, SUM(C.quantity * C.unit_price) AS new_price
-            INTO TempPriceUpdate
-            FROM Components AS C
-            INNER JOIN Line_Items AS L ON C.line_ID = L.line_ID
-            WHERE L.opportunity_ID = ?
-            GROUP BY C.line_ID
-        """, (opportunity_id,))
+            SELECT SUM(quantity * unit_price) AS total_price
+            FROM "Components"
+            WHERE "line_ID" = %s
+        """, (line_id,))
+        total_price = cursor.fetchone()["total_price"]
 
-        cursor.execute("""
-            UPDATE Line_Items AS L
-            INNER JOIN TempPriceUpdate AS T
-            ON L.line_ID = T.line_ID
-            SET L.unit_price = T.new_price
-        """)
+        # Only update if components produced a valid non-zero price
+        # (Prevents wiping out manually-set prices)
+        if total_price and total_price > 0:
+            cursor.execute("""
+                UPDATE "Line_Items"
+                SET unit_price = %s
+                WHERE "line_ID" = %s
+            """, (total_price, line_id))
 
-        cursor.execute("DROP TABLE TempPriceUpdate")
-        conn.commit()
-    except Exception as e:
-        print("⚠️ TempPriceUpdate skipped (likely no components):", e)
-        conn.rollback()
+    conn.commit()
 
-    # ✅ STEP 2: Load Opportunity data
+
+    # ============================================================
+    # STEP 2: Load Opportunity line items + components
+    # ============================================================
+
+    # FIXED get_line_items must also use RealDictCursor
     rows = get_line_items(opportunity_id)
+
     component_types = get_component_types()
-    component_type_lookup = {ct[0]: ct[1] for ct in component_types}
+    component_type_lookup = {
+        ct["component_type_ID"]: ct["component_types_description"]
+        for ct in component_types
+    }
 
     items = []
-    for row in rows:
-        item = dict(zip([column[0] for column in row.cursor_description], row))
+    for item in rows:
 
-        comps = get_components(item["line_ID"])
+        # item is already a dict now
+        line_id = item["line_ID"]
+
+        # Load components
+        comps = get_components(line_id)
+
         components_list = []
-
         for c in comps:
-            comp_dict = {
-                "component_ID": int(c[0]),
-                "component_type_ID": int(c[2]) if c[2] else None,
-                "description": component_type_lookup.get(c[2], "Unknown"),
-                "quantity": float(c[3] or 0),
-                "unit_cost": float(c[4] or 0),
-                "unit_price": float(c[5] or 0),
-            }
-            components_list.append(comp_dict)
+            components_list.append({
+                "component_ID": c["component_ID"],
+                "component_type_ID": c["component_type_ID"],
+                "description": component_type_lookup.get(c["component_type_ID"], "Unknown"),
+                "quantity": c["quantity"],
+                "unit_cost": c["unit_cost"],
+                "unit_price": c["unit_price"],
+            })
 
         item["components"] = components_list
         items.append(item)
 
-    # ✅ STEP 3: Load Standard Line Items
+
+    # ============================================================
+    # STEP 3: Load standard line items
+    # ============================================================
     try:
-        cursor.execute("SELECT * FROM Standard_Line_Items")
+        cursor.execute('SELECT * FROM "Standard_Line_Items"')
         standard_line_items = cursor.fetchall()
-    except Exception as e:
-        print("⚠️ Could not load Standard_Line_Items:", e)
+    except:
         standard_line_items = []
 
     conn.close()
 
-    # ====== ⛔ CRITICAL ADDITION BELOW: PASS USER TYPE TO TEMPLATE ======
     user_type = session.get("employee_type", "Unknown")
-    # ===================================================================
-
-    # Popup state
     show_popup = request.args.get("show_popup", "false")
     popup_line_id = request.args.get("line_id")
 
@@ -4313,7 +4629,7 @@ def show_opportunity_route(opportunity_id):
         show_popup=show_popup,
         popup_line_id=popup_line_id,
         standard_line_items=standard_line_items,
-        user_type=user_type     # ✅ MUST BE PASSED IN
+        user_type=user_type
     )
 
 ########################################################################################################################
@@ -4325,33 +4641,42 @@ def add_line_item_route(opportunity_id):
     description = request.form["description"]
     quantity = int(request.form["quantity"])
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # --- Get unified next available line_ID (check both tables) ---
-    cursor.execute("SELECT MAX(line_ID) FROM Line_Items")
+    cursor.execute('SELECT MAX("line_ID") FROM "Line_Items"')
     max_line_items = cursor.fetchone()[0]
     max_line_items = int(max_line_items) if max_line_items is not None else 0
 
-    cursor.execute("SELECT MAX(line_ID) FROM Customer_Line_Items")
+    cursor.execute('SELECT MAX("line_ID") FROM "Customer_Line_Items"')
     max_customer_items = cursor.fetchone()[0]
     max_customer_items = int(max_customer_items) if max_customer_items is not None else 0
 
-    next_line_id = max(int(max_line_items), int(max_customer_items)) + 1
+    next_line_id = max(max_line_items, max_customer_items) + 1
 
     # --- Get next sequence number within this opportunity ---
     cursor.execute("""
-        SELECT MAX(line_item_sequence) FROM Line_Items WHERE opportunity_ID = ?
+        SELECT MAX(line_item_sequence)
+        FROM "Line_Items"
+        WHERE "opportunity_ID" = %s
     """, (opportunity_id,))
     max_seq = cursor.fetchone()[0] or 0
     new_sequence = max_seq + 100
 
-    # --- Insert new line item with unified line_ID and ACTIVE status ---
+    # --- Insert new line item ---
     cursor.execute("""
-        INSERT INTO Line_Items (
-            line_ID, opportunity_ID, line_item_description, quantity, unit_cost, unit_price, line_item_sequence, activation_status
+        INSERT INTO "Line_Items" (
+            "line_ID",
+            "opportunity_ID",
+            line_item_description,
+            quantity,
+            unit_cost,
+            unit_price,
+            line_item_sequence,
+            activation_status
         )
-        VALUES (?, ?, ?, ?, 0, 0, ?, 'ACTIVE')
+        VALUES (%s, %s, %s, %s, 0, 0, %s, 'ACTIVE')
     """, (next_line_id, opportunity_id, description, quantity, new_sequence))
 
     # --- Update opportunity total ---
@@ -4394,24 +4719,38 @@ def add_component_material(component_id):
     material_id = request.form["material_id"]
     quantity = float(request.form["quantity"] or 0)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_MFG_Materials" (
+            "component_ID",
+            "material_ID",
+            quantity
+        )
+        VALUES (%s, %s, %s)
     """, (component_id, material_id, quantity))
+
     conn.commit()
     conn.close()
 
+    # Update totals using PostgreSQL-safe backend helper
     update_component_totals(component_id)
 
     return redirect(url_for(
         'quote_component',
         component_id=component_id,
         component_type_id=1,
-        customer_id=request.args.get('customer_id') or request.form.get('customer_id') or request.args.get('cust'),
-        opportunity_id=request.args.get('opportunity_id') or request.form.get('opportunity_id') or request.args.get(
-            'opp')
+        customer_id=(
+            request.args.get('customer_id')
+            or request.form.get('customer_id')
+            or request.args.get('cust')
+        ),
+        opportunity_id=(
+            request.args.get('opportunity_id')
+            or request.form.get('opportunity_id')
+            or request.args.get('opp')
+        )
     ))
 
 ########################################################################################################################
@@ -4429,34 +4768,50 @@ def add_nonstock_component_material(component_id):
     material_price = float(request.form["material_price"])
     quantity = float(request.form["quantity"] or 0)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1️⃣ INSERT MATERIAL AND GET NEW ID USING RETURNING (PostgreSQL way)
     cursor.execute("""
-        INSERT INTO Materials (material_description, material_unit, material_price, stock)
-        VALUES (?, ?, ?, 'NO')
+        INSERT INTO "Materials" (
+            material_description,
+            material_unit,
+            material_price,
+            stock
+        )
+        VALUES (%s, %s, %s, 'NO')
+        RETURNING "material_ID"
     """, (material_description, material_unit, material_price))
-    conn.commit()
 
-    cursor.execute("SELECT @@IDENTITY AS new_id")
-    new_material_id = cursor.fetchone().new_id
+    new_material_id = cursor.fetchone()[0]
 
+    # 2️⃣ INSERT INTO component_MFG_Materials
     cursor.execute("""
-        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_MFG_Materials" (
+            "component_ID",
+            "material_ID",
+            quantity
+        )
+        VALUES (%s, %s, %s)
     """, (component_id, new_material_id, quantity))
+
     conn.commit()
     conn.close()
 
+    # 3️⃣ UPDATE COMPONENT TOTALS
     update_component_totals(component_id)
 
+    # 4️⃣ FINAL REDIRECT
     return redirect(url_for(
         'quote_component',
         component_id=component_id,
         component_type_id=1,
-        customer_id=request.args.get('customer_id') or request.form.get('customer_id') or request.args.get('cust'),
-        opportunity_id=request.args.get('opportunity_id') or request.form.get('opportunity_id') or request.args.get(
-            'opp')
+        customer_id=(request.args.get('customer_id')
+                     or request.form.get('customer_id')
+                     or request.args.get('cust')),
+        opportunity_id=(request.args.get('opportunity_id')
+                        or request.form.get('opportunity_id')
+                        or request.args.get('opp'))
     ))
 
 ########################################################################################################################
@@ -4472,114 +4827,158 @@ def add_component_labor(component_id):
     labor_id = int(request.form["labor_id"])
     quantity = float(request.form["quantity"] or 0)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
+    # Insert labor record (PostgreSQL uses %s and quoted identifiers)
     cursor.execute("""
-        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_MFG_Labor" (
+            "component_ID",
+            "labor_ID",
+            quantity
+        )
+        VALUES (%s, %s, %s)
     """, (component_id, labor_id, quantity))
+
     conn.commit()
     conn.close()
 
+    # Recalculate totals
     update_component_totals(component_id)
 
+    # Redirect back to the component quote screen
     return redirect(url_for(
         'quote_component',
         component_id=component_id,
         component_type_id=1,
-        customer_id=request.args.get('customer_id') or request.form.get('customer_id') or request.args.get('cust'),
-        opportunity_id=request.args.get('opportunity_id') or request.form.get('opportunity_id') or request.args.get(
-            'opp')
+        customer_id=(
+            request.args.get('customer_id')
+            or request.form.get('customer_id')
+            or request.args.get('cust')
+        ),
+        opportunity_id=(
+            request.args.get('opportunity_id')
+            or request.form.get('opportunity_id')
+            or request.args.get('opp')
+        )
     ))
 
 ########################################################################################################################
 
 """ROUTE TO MAKE CONTRACT"""
-
 @app.route("/opportunity/<int:opportunity_id>/contract")
 def contract_route(opportunity_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Fetch opportunity info
+    # Fetch opportunity + customer info
     cursor.execute("""
-        SELECT o.opportunity_ID, o.opportunity_name, o.opportunity_price, o.tax_rate, o.tax_type, o.site_address, 
-               o.site_city, o.site_state, o.site_zip, 
-               c.customer_name, c.customer_email, c.contact_first_name, c.contact_last_name, c.contact_phone,
-               c.billing_address, c.billing_city, c.billing_state, c.billing_zip
-        FROM Opportunities o
-        INNER JOIN Customers c ON o.customer_ID = c.customer_ID
-        WHERE o.opportunity_ID = ?
-    """, opportunity_id)
-    opportunity = cursor.fetchone()
-    if not opportunity:
+        SELECT 
+            o."opportunity_ID",
+            o.opportunity_name,
+            o.opportunity_price,
+            o.tax_rate,
+            o.tax_type,
+            o.site_address,
+            o.site_city,
+            o.site_state,
+            o.site_zip,
+
+            c.customer_name,
+            c.customer_email,
+            c.contact_first_name,
+            c.contact_last_name,
+            c.contact_phone,
+            c.billing_address,
+            c.billing_city,
+            c.billing_state,
+            c.billing_zip
+
+        FROM "Opportunities" o
+        INNER JOIN "Customers" c 
+            ON o."customer_ID" = c."customer_ID"
+        WHERE o."opportunity_ID" = %s
+    """, (opportunity_id,))
+
+    row = cursor.fetchone()
+
+    if not row:
         conn.close()
         return "Opportunity not found", 404
 
-    # Convert opportunity to dict for template
+    # Convert DB row → dict safely for psycopg2
     opportunity_dict = {
-        "opportunity_ID": opportunity.opportunity_ID,
-        "opportunity_name": opportunity.opportunity_name,
-        "opportunity_price": float(opportunity.opportunity_price or 0),
-        "tax_rate": float(opportunity.tax_rate or 0),
-        "tax_type": opportunity.tax_type or "Standard",
-        "site_address": opportunity.site_address,
-        "site_city": opportunity.site_city,
-        "site_state": opportunity.site_state,
-        "site_zip": opportunity.site_zip,
-        "customer_name": opportunity.customer_name,
-        "customer_email": opportunity.customer_email,
-        "contact_first_name": opportunity.contact_first_name,
-        "contact_last_name": opportunity.contact_last_name,
-        "contact_phone": opportunity.contact_phone,
-        "billing_address": opportunity.billing_address,
-        "billing_city": opportunity.billing_city,
-        "billing_state": opportunity.billing_state,
-        "billing_zip": opportunity.billing_zip
+        "opportunity_ID": row[0],
+        "opportunity_name": row[1],
+        "opportunity_price": float(row[2] or 0),
+        "tax_rate": float(row[3] or 0),
+        "tax_type": row[4] or "Standard",
+
+        "site_address": row[5],
+        "site_city": row[6],
+        "site_state": row[7],
+        "site_zip": row[8],
+
+        "customer_name": row[9],
+        "customer_email": row[10],
+        "contact_first_name": row[11],
+        "contact_last_name": row[12],
+        "contact_phone": row[13],
+
+        "billing_address": row[14],
+        "billing_city": row[15],
+        "billing_state": row[16],
+        "billing_zip": row[17],
     }
 
-    # Fetch line items for this opportunity
+    # Fetch line items
     cursor.execute("""
-        SELECT line_ID, line_item_description, quantity, unit_price, activation_status
-        FROM Line_Items
-        WHERE opportunity_ID = ?
+        SELECT 
+            "line_ID",
+            line_item_description,
+            quantity,
+            unit_price,
+            activation_status
+        FROM "Line_Items"
+        WHERE "opportunity_ID" = %s
         ORDER BY line_item_sequence
-    """, opportunity_id)
+    """, (opportunity_id,))
 
-    columns = [column[0] for column in cursor.description]
-    line_items = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    colnames = [desc[0] for desc in cursor.description]
+    line_items = [dict(zip(colnames, r)) for r in cursor.fetchall()]
 
-    # Filter only ACTIVE line items
+    # Process only ACTIVE items
     active_items = []
     subtotal = 0.0
+
     for item in line_items:
         if item["activation_status"] == "ACTIVE":
-            item["quantity"] = float(item["quantity"] or 0)
-            item["unit_price"] = float(item["unit_price"] or 0)
-            item["subtotal"] = item["quantity"] * item["unit_price"]
+            qty = float(item["quantity"] or 0)
+            price = float(item["unit_price"] or 0)
+            item["subtotal"] = qty * price
             subtotal += item["subtotal"]
             active_items.append(item)
 
+    # TAX LOGIC
     tax_type = opportunity_dict["tax_type"]
 
-    if tax_type in ["Exempt", "New Construction"]:
+    if tax_type in ("Exempt", "New Construction"):
         tax_amount = 0.0
     else:
         tax_amount = subtotal * (opportunity_dict["tax_rate"] / 100)
 
     grand_total = subtotal + tax_amount
 
-    # ✅ Embed your company logo directly as Base64
+    # Load logo
     try:
         with open(r"C:\Users\Brooks\OneDrive\Desktop\Picture1.jpg", "rb") as img_file:
-            logo_b64 = base64.b64encode(img_file.read()).decode("utf-8")
+            logo_b64 = base64.b64encode(img_file.read()).decode()
     except Exception as e:
-        logo_b64 = None
         print("⚠️ Logo load failed:", e)
+        logo_b64 = None
 
     conn.close()
 
-    # Render the contract template with embedded logo
     return render_template_string(
         CONTRACT_TEMPLATE,
         opportunity=opportunity_dict,
@@ -4587,7 +4986,7 @@ def contract_route(opportunity_id):
         subtotal=subtotal,
         tax_amount=tax_amount,
         grand_total=grand_total,
-        company_logo=logo_b64  # ✅ pass Base64 image to template
+        company_logo=logo_b64
     )
 
 ########################################################################################################################
@@ -4597,59 +4996,67 @@ def contract_route(opportunity_id):
 @app.route("/line_item/<int:line_id>/add_component", methods=["POST"])
 def add_component_route(line_id):
     """
-    Add a new component to a given line item.
+    Add a new component to a given line item (PostgreSQL version).
     """
     try:
-        # Get the selected component type from the form
+        # Get selected component type
         component_type_id = request.form.get("component_type_id")
-        print("Form component_type_id:", component_type_id)  # DEBUG
+        print("Form component_type_id:", component_type_id)
 
         if not component_type_id:
             flash("Please select a component type.")
-            print("No component_type_id provided, redirecting.")  # DEBUG
             return redirect(url_for("show_opportunity_route",
                                     opportunity_id=get_opportunity_id_by_line(line_id)))
 
-        # Convert to integer just in case
         component_type_id = int(component_type_id)
 
-        # Default values for a new component
+        # Defaults
         quantity = 1
         unit_cost = 0
         unit_price = 0
         factor1 = factor2 = factor3 = factor4 = factor5 = 0
 
-        # Insert new component into Components table
-        conn = pyodbc.connect(CONN_STR)
+        # Use PostgreSQL connection
+        conn = get_db_connection()
         cursor = conn.cursor()
+
         sql = """
-            INSERT INTO Components
-            (line_ID, component_type_ID, quantity, unit_cost, unit_price,
+            INSERT INTO "Components"
+            ("line_ID", "component_type_ID", quantity, unit_cost, unit_price,
              factor1, factor2, factor3, factor4, factor5)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (line_id, component_type_id, quantity, unit_cost, unit_price,
-                  factor1, factor2, factor3, factor4, factor5)
 
-        print("Executing SQL:", sql)  # DEBUG
-        print("With params:", params)  # DEBUG
+        params = (
+            line_id, component_type_id, quantity,
+            unit_cost, unit_price,
+            factor1, factor2, factor3, factor4, factor5
+        )
+
+        print("Executing SQL:", sql)
+        print("With params:", params)
+
         cursor.execute(sql, params)
-        print("Inserted rows:", cursor.rowcount)  # DEBUG
-
         conn.commit()
+        cursor.close()
         conn.close()
-        print("Insert committed and connection closed.")  # DEBUG
 
-        # Redirect back to the line items page for this opportunity
+        print("Insert committed and connection closed.")
+
+        # Redirect back to opportunity page
         opportunity_id = get_opportunity_id_by_line(line_id)
-        print("Redirecting to opportunity:", opportunity_id)  # DEBUG
+        print("Redirecting to opportunity:", opportunity_id)
+
         return redirect(url_for("show_opportunity_route", opportunity_id=opportunity_id))
 
     except Exception as e:
-        print("Error inserting component:", str(e))  # DEBUG
-        flash("Error adding component. Check logs for details.")
-        return redirect(url_for("show_opportunity_route",
-                                opportunity_id=get_opportunity_id_by_line(line_id)))
+        print("❌ Error inserting component:", str(e))
+        flash("Error adding component — check logs for details.")
+
+        return redirect(url_for(
+            "show_opportunity_route",
+            opportunity_id=get_opportunity_id_by_line(line_id)
+        ))
 
 ########################################################################################################################
 
@@ -4663,24 +5070,34 @@ def update_line_item_and_components(opportunity_id, line_id):
     sequence_number = int(request.form["sequence_number"])
     component_type_id = request.form.get("component_type_id")
 
-    # Update line item
+    # --- Update line item ---
     update_line_item(line_id, description, quantity, activation_status, sequence_number)
 
-    # Add component if selected
+    # --- Add a new component if the user selected one ---
     if component_type_id:
-        # Insert new component with default values
-        conn = pyodbc.connect(CONN_STR)
+        component_type_id = int(component_type_id)
+
+        conn = get_db_connection()
         cursor = conn.cursor()
+
         cursor.execute("""
-            INSERT INTO Components
-            (line_ID, component_type_ID, quantity, unit_cost, unit_price,
+            INSERT INTO "Components"
+            ("line_ID", "component_type_ID", quantity, unit_cost, unit_price,
              factor1, factor2, factor3, factor4, factor5, factor6)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (line_id, component_type_id, 1, 0, 0, 0, 0, 0, 0, 0, 0))
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            line_id,
+            component_type_id,
+            1,      # quantity default
+            0, 0,   # cost & price
+            0, 0, 0, 0, 0, 0  # factor1–6
+        ))
+
         conn.commit()
+        cursor.close()
         conn.close()
 
-    # Update line totals
+    # --- Update totals ---
     update_line_item_totals(line_id)
     update_opportunity_price(opportunity_id)
 
@@ -4696,7 +5113,6 @@ def update_line_item_and_components(opportunity_id, line_id):
 
 @app.route("/quote_component/<int:component_id>/<int:component_type_id>", methods=["GET", "POST"])
 def quote_component(component_id, component_type_id):
-
     # --- 🔒 SAFELY get both IDs from args or form ---
     raw_customer_id = request.args.get("customer_id") or request.form.get("customer_id")
     raw_opportunity_id = request.args.get("opportunity_id") or request.form.get("opportunity_id")
@@ -4711,39 +5127,50 @@ def quote_component(component_id, component_type_id):
     except ValueError:
         opportunity_id = None
 
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
+    # Use NamedTupleCursor so row.factor1, row.factor25, etc. still work
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.NamedTupleCursor)
 
     # Try normal Line_Items first (opportunity-level)
     cursor.execute("""
-        SELECT c.component_ID, c.unit_cost, c.unit_price,
-               c.factor1, c.factor2, c.factor3, c.factor4, c.factor5,
-               c.factor6, c.factor7, c.factor8, c.factor9, c.factor10,
-               c.factor11, c.factor12, c.factor13, c.factor14, c.factor15,
-               c.factor16, c.factor17, c.factor18, c.factor19, c.factor20,
-               c.factor21, c.factor22, c.factor23, c.factor24, 
-               c.factor25, c.factor26, c.factor27,
-               l.line_item_description, l.opportunity_id, l.line_ID
-        FROM Components c
-        INNER JOIN Line_Items l ON c.line_ID = l.line_ID
-        WHERE c.component_ID = ?
+        SELECT 
+            c."component_ID",
+            c.unit_cost,
+            c.unit_price,
+            c.factor1, c.factor2, c.factor3, c.factor4, c.factor5,
+            c.factor6, c.factor7, c.factor8, c.factor9, c.factor10,
+            c.factor11, c.factor12, c.factor13, c.factor14, c.factor15,
+            c.factor16, c.factor17, c.factor18, c.factor19, c.factor20,
+            c.factor21, c.factor22, c.factor23, c.factor24,
+            c.factor25, c.factor26, c.factor27,
+            l.line_item_description,
+            l."opportunity_ID" AS opportunity_id,
+            l."line_ID"
+        FROM "Components" c
+        INNER JOIN "Line_Items" l ON c."line_ID" = l."line_ID"
+        WHERE c."component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
 
     # If not found, try the Customer_Line_Items table instead
     if not row:
         cursor.execute("""
-            SELECT c.component_ID, c.unit_cost, c.unit_price,
-                   c.factor1, c.factor2, c.factor3, c.factor4, c.factor5,
-                   c.factor6, c.factor7, c.factor8, c.factor9, c.factor10,
-                   c.factor11, c.factor12, c.factor13, c.factor14, c.factor15,
-                   c.factor16, c.factor17, c.factor18, c.factor19, c.factor20,
-                   c.factor21, c.factor22, c.factor23, c.factor24, 
-                   c.factor25, c.factor26, c.factor27,
-                   l.line_item_description, NULL AS opportunity_id, l.line_ID
-            FROM Components c
-            INNER JOIN Customer_Line_Items l ON c.line_ID = l.line_ID
-            WHERE c.component_ID = ?
+            SELECT 
+                c."component_ID",
+                c.unit_cost,
+                c.unit_price,
+                c.factor1, c.factor2, c.factor3, c.factor4, c.factor5,
+                c.factor6, c.factor7, c.factor8, c.factor9, c.factor10,
+                c.factor11, c.factor12, c.factor13, c.factor14, c.factor15,
+                c.factor16, c.factor17, c.factor18, c.factor19, c.factor20,
+                c.factor21, c.factor22, c.factor23, c.factor24,
+                c.factor25, c.factor26, c.factor27,
+                l.line_item_description,
+                NULL::integer AS opportunity_id,
+                l."line_ID"
+            FROM "Components" c
+            INNER JOIN "Customer_Line_Items" l ON c."line_ID" = l."line_ID"
+            WHERE c."component_ID" = %s
         """, (component_id,))
         row = cursor.fetchone()
 
@@ -4796,7 +5223,9 @@ def quote_component(component_id, component_type_id):
     context["factor27_list"] = factor27_list
     context["excel_rows"] = excel_rows
 
-
+    # =====================================================================
+    #  component_type_id == 2 → INSTALLATION
+    # =====================================================================
     if component_type_id == 2:  # INSTALLATION
 
         install_labor_types = get_install_labor_types()
@@ -4812,9 +5241,7 @@ def quote_component(component_id, component_type_id):
             customer_id=customer_id,
             opportunity_id=opportunity_id
         )
-    # ------------------------------------------------------------
-    # Handle opportunity/customer context
-    # ------------------------------------------------------------
+        # Handle opportunity/customer context
         if not opportunity_id:
             opportunity_id = 0
             context["opportunity_id"] = opportunity_id
@@ -4822,7 +5249,7 @@ def quote_component(component_id, component_type_id):
         else:
             context["hide_back_button"] = False
 
-    # Try to fetch or infer the customer_id (same pattern as Custom Sign)
+        # Try to fetch or infer the customer_id (same pattern as Custom Sign)
         customer_id = (
             locals().get("customer_id")
             or context.get("customer_id")
@@ -4834,12 +5261,12 @@ def quote_component(component_id, component_type_id):
 
         print("customer_id:", context.get("customer_id"), "hide_back_button:", context.get("hide_back_button"))
 
-        # ------------------------------------------------------------
-    # Render the Install Quote Template
-    # ------------------------------------------------------------
         return render_template_string(QUOTE_INSTALLATION, **context)
 
-    elif component_type_id == 3:  # PIPE & FOUNDATIONS
+    # =====================================================================
+    #  component_type_id == 3 → PIPE & FOUNDATIONS
+    # =====================================================================
+    elif component_type_id == 3:
         params = {}
         options = []
 
@@ -4854,52 +5281,95 @@ def quote_component(component_id, component_type_id):
         context.update(params=params, options=options)
         return render_template_string(QUOTE_PIPE_FOUNDATIONS, **context)
 
-    elif component_type_id == 4:  # EMC
+    # =====================================================================
+    #  component_type_id == 4 → EMC
+    # =====================================================================
+    elif component_type_id == 4:
         # Fetch EMC rows
         component_emc = get_component_emc(component_id)
 
-        # Inject into template context
         context.update(
             component_emc=component_emc,
         )
 
-        # Mirror the same context handling you used for Custom Sign / Install
-        # (Assumes `row` above already has component + line info like before)
         if not opportunity_id:
             opportunity_id = 0
             context["opportunity_id"] = opportunity_id
 
-        # Try to infer customer_id the same way
         customer_id = (
-                locals().get("customer_id")
-                or context.get("customer_id")
-                or getattr(row, "customer_id", None)
-                or 0
+            locals().get("customer_id")
+            or context.get("customer_id")
+            or getattr(row, "customer_id", None)
+            or 0
         )
         context["customer_id"] = customer_id or 0
 
-        # (Optional) If you still use hide_back_button elsewhere, you can omit it here
-        # and just let the template show the correct link based on which ID is nonzero.
-
         return render_template_string(QUOTE_EMC, **context)
 
-    elif component_type_id == 5:  # Face-Lit Channel Letters
-        # ✅ Always capture IDs safely
-        customer_id = request.form.get("customer_id") or request.args.get("customer_id") or None
-        opportunity_id = request.form.get("opportunity_id") or request.args.get("opportunity_id") or None
+    # =====================================================================
+    #  component_type_id == 5 → FACE-LIT CHANNEL LETTERS
+    # =====================================================================
+    elif component_type_id == 5:
 
-        # ✅ Clean type coercion
-        try:
-            opportunity_id = int(opportunity_id) if opportunity_id not in (None, "", "None") else None
-        except ValueError:
-            opportunity_id = None
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        try:
-            customer_id = int(customer_id) if customer_id not in (None, "", "None") else None
-        except ValueError:
-            customer_id = None
+        cursor.execute("""
+            SELECT 
+                li."opportunity_ID",
+                o."customer_ID"
+            FROM "Components" c
+            JOIN "Line_Items" li ON li."line_ID" = c."line_ID"
+            JOIN "Opportunities" o ON o."opportunity_ID" = li."opportunity_ID"
+            WHERE c."component_ID" = %s
+        """, (component_id,))
+        row_ids = cursor.fetchone()
 
-        # ✅ Add to template context
+        # ---------------------------------------------------------
+        # 2) If NOT found, it must belong to a CUSTOMER line item
+        # ---------------------------------------------------------
+        if not row_ids:
+            cursor.execute("""
+                SELECT 
+                    NULL AS opportunity_ID,
+                    cli."customer_ID"
+                FROM "Components" c
+                JOIN "Customer_Line_Items" cli ON cli."line_ID" = c."line_ID"
+                WHERE c."component_ID" = %s
+            """, (component_id,))
+            row_ids = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        # row_ids is now guaranteed to be found
+        db_opportunity_id = row_ids[0]
+        db_customer_id = row_ids[1]
+
+        # ---------------------------------------------------------
+        # 3) Allow overrides (back button propagation)
+        # ---------------------------------------------------------
+        form_opp = request.form.get("opportunity_id") or request.args.get("opportunity_id")
+        form_cust = request.form.get("customer_id") or request.args.get("customer_id")
+
+        opportunity_id = db_opportunity_id
+        customer_id = db_customer_id
+
+        if form_opp not in (None, "", "None"):
+            try:
+                opportunity_id = int(form_opp)
+            except:
+                pass
+
+        if form_cust not in (None, "", "None"):
+            try:
+                customer_id = int(form_cust)
+            except:
+                pass
+
+        # ---------------------------------------------------------
+        # 4) Push IDs into context — ALWAYS VALID NOW
+        # ---------------------------------------------------------
         context.update(customer_id=customer_id, opportunity_id=opportunity_id)
 
         if request.method == "POST":
@@ -4918,6 +5388,8 @@ def quote_component(component_id, component_type_id):
 
                 wb = load_workbook(temp_path, data_only=True)
                 if "Sheet2" not in wb.sheetnames:
+                    wb.close()
+                    os.remove(temp_path)
                     return "Excel file missing Sheet2", 400
                 sheet = wb["Sheet2"]
 
@@ -4954,30 +5426,25 @@ def quote_component(component_id, component_type_id):
                 perimeters_str = getattr(row, "factor27", None)
 
             # Update factors in Components table
-            conn = pyodbc.connect(CONN_STR)
+            conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                        UPDATE Components
-                        SET factor1 = ?, factor2 = ?, factor3 = ?, factor4 = ?,
-                            factor5 = ?, factor6 = ?, factor7 = ?, factor8 = ?,
-                            factor25 = ?, factor26 = ?, factor27 = ?
-                        WHERE component_ID = ?
-                    """, (
+                UPDATE "Components"
+                SET factor1 = %s, factor2 = %s, factor3 = %s, factor4 = %s,
+                    factor5 = %s, factor6 = %s, factor7 = %s, factor8 = %s,
+                    factor25 = %s, factor26 = %s, factor27 = %s
+                WHERE "component_ID" = %s
+            """, (
                 factors["factor1"], factors["factor2"], factors["factor3"], factors["factor4"],
                 factors["factor5"], factors["factor6"], factors["factor7"], factors["factor8"],
                 modules_str, areas_str, perimeters_str, component_id
             ))
 
-            conn.commit()
-
             # Clear old material/labor records
-            cursor.execute("DELETE FROM component_MFG_Materials WHERE component_ID = ?", (component_id,))
-            cursor.execute("DELETE FROM component_MFG_Labor WHERE component_ID = ?", (component_id,))
+            cursor.execute('DELETE FROM "component_MFG_Materials" WHERE "component_ID" = %s', (component_id,))
+            cursor.execute('DELETE FROM "component_MFG_Labor"     WHERE "component_ID" = %s', (component_id,))
 
-            # ------------------------------
-            # 🔥 backend calculations
-            # ------------------------------
-
+            # ---------- backend calculations ----------
             factor25_list = modules_str.split(",") if modules_str else []
             factor26_list = areas_str.split(",") if areas_str else []
             factor27_list = perimeters_str.split(",") if perimeters_str else []
@@ -4987,218 +5454,169 @@ def quote_component(component_id, component_type_id):
             list_of_perimeters = [float(x) for x in factor27_list if x not in (None, "", "0")]
 
             ############################################################################################################
-            ############################################################################################################
-            """CODE FOR MATERIALS"""
-            ############################################################################################################
+            """ CODE FOR MATERIALS """
             ############################################################################################################
 
-            ############################################################################################################
-            """CODE FOR LETTER BACKS"""
-            ############################################################################################################
-
+            # LETTER BACKS
             if factors["factor1"] == 1:
                 ACM_SHEETS = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 10, ACM_SHEETS))
-
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 10, ACM_SHEETS))
             else:
                 _063_SHEETS = math.ceil(sum(list_of_areas) / .45 / 40)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 4, _063_SHEETS))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 4, _063_SHEETS))
 
-            ############################################################################################################
-            """CODE FOR RETAINERS/TRIMCAP"""
-            ############################################################################################################
-
+            # RETAINERS / TRIMCAP
             if factors["factor2"] == 1:
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 60, math.ceil(sum(list_of_perimeters))))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 60, math.ceil(sum(list_of_perimeters))))
 
             elif factors["factor6"] == 2:
-
                 _090_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 6, _090_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 6, _090_sheets))
 
                 _063_sheets = math.ceil(sum(list_of_perimeters) / 240 * 1.1)
-
                 cursor.execute("""
-                                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 4, _063_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 4, _063_sheets))
 
-            ############################################################################################################
-            """CODE FOR COIL"""
-            ############################################################################################################
-
+            # COIL
             if factors["factor2"] == 1:
-
                 _5in_coil = math.ceil(sum(list_of_perimeters))
-
                 cursor.execute("""
-                                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 58, _5in_coil))
-
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 58, _5in_coil))
             else:
-
                 _3in_coil = math.ceil(sum(list_of_perimeters))
-
                 cursor.execute("""
-                                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 59, _3in_coil))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 59, _3in_coil))
 
-            ############################################################################################################
-            """CODE FOR RACEWAYS"""
-            ############################################################################################################
-
+            # RACEWAYS
             if factors["factor5"] == 2:
                 inserts = [
                     (component_id, 71, 1),
                     (component_id, 72, 1),
                     (component_id, 73, 2),
-                    (component_id, 77, 7)
+                    (component_id, 77, 7),
                 ]
-
                 cursor.executemany("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, inserts)
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, inserts)
 
             elif factors["factor5"] == 3:
                 inserts = [
                     (component_id, 74, 1),
                     (component_id, 75, 1),
                     (component_id, 76, 2),
-                    (component_id, 77, 7)
+                    (component_id, 77, 7),
                 ]
-
                 cursor.executemany("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, inserts)
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, inserts)
 
-            ############################################################################################################
-            """CODE FOR FACES"""
-            ############################################################################################################
-
+            # FACES
             if factors["factor3"] == 1:
-
                 white_acrylic_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 39, white_acrylic_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 39, white_acrylic_sheets))
 
             elif factors["factor3"] == 2:
-
                 clear_acrylic_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 40, clear_acrylic_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 40, clear_acrylic_sheets))
 
             elif factors["factor3"] == 3:
-
                 white_poly_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 43, white_poly_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 43, white_poly_sheets))
 
             elif factors["factor3"] == 4:
                 clear_poly_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 44, clear_poly_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 44, clear_poly_sheets))
 
-            ############################################################################################################
-            """CODE FOR LEDS/PS"""
-            ############################################################################################################
-
+            # LEDS / POWER SUPPLIES
             inserts = [
                 (component_id, 49, math.ceil(sum(list_of_modules) / 200)),
                 (component_id, 52, math.ceil(sum(list_of_modules) * .461 / 60)),
                 (component_id, 54, 1),
-                (component_id, 55, 1)
+                (component_id, 55, 1),
             ]
 
             if factors["factor5"] == 1:
                 inserts.append(
-                    (component_id, 56, math.ceil(math.ceil(sum(list_of_modules) * .461 / 60)) / 2))
-                inserts.append((component_id, 57, len(list_of_perimeters)))
-
+                    (component_id, 56, math.ceil(math.ceil(sum(list_of_modules) * .461 / 60)) / 2)
+                )
+                inserts.append(
+                    (component_id, 57, len(list_of_perimeters))
+                )
             else:
                 inserts.append(
                     (component_id, 57, 1)
                 )
 
             cursor.executemany("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, inserts)
+                INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, inserts)
 
-            ############################################################################################################
-            """CODE FOR INK"""
-            ############################################################################################################
-
-            if factors["factor7"] == 1 or factors["factor7"] == 4 or factors["factor7"] == 5:
+            # INK
+            if factors["factor7"] in (1, 4, 5):
                 ml_ink = math.ceil(sum(list_of_areas))
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 45, ml_ink))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 45, ml_ink))
 
-            if factors["factor7"] == 2 or factors["factor7"] == 4:
-
+            # VINYL
+            if factors["factor7"] in (2, 4):
                 sqft_vinyl = math.ceil(sum(list_of_areas) / .45 / 32) * 32
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 46, sqft_vinyl))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 46, sqft_vinyl))
 
-            elif factors["factor7"] == 3 or factors["factor7"] == 5:
-
+            elif factors["factor7"] in (3, 5):
                 sqft_vinyl = math.ceil(sum(list_of_areas) / .45 / 32) * 32
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 47, sqft_vinyl))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 47, sqft_vinyl))
 
-            ############################################################################################################
-            """CODE FOR PAINT"""
-            ############################################################################################################
-
+            # PAINT
             paint_area = 0
 
-            if factors["factor2"] == 1 and (factors["factor4"] == 1 or factors["factor4"] == 3):
+            if factors["factor2"] == 1 and (factors["factor4"] in (1, 3)):
                 paint_area += math.ceil(sum(list_of_perimeters) * .75)
 
-            if factors["factor2"] == 2 and (factors["factor4"] == 1 or factors["factor4"] == 3):
+            if factors["factor2"] == 2 and (factors["factor4"] in (1, 3)):
                 paint_area += math.ceil(sum(list_of_perimeters) * .5)
 
-            if factors["factor4"] == 2 or factors["factor4"] == 3:
+            if factors["factor4"] in (2, 3):
                 paint_area += math.ceil(sum(list_of_perimeters) * .25)
 
             if factors["factor6"] == 2:
@@ -5212,299 +5630,210 @@ def quote_component(component_id, component_type_id):
 
             if paint_area != 0:
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 48, paint_area))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 48, paint_area))
 
             ############################################################################################################
-            ############################################################################################################
-            """CODE FOR LABOR"""
-            ############################################################################################################
+            """ CODE FOR LABOR """
             ############################################################################################################
 
-            ############################################################################################################
-            """DRAWING LABOR"""
-            ############################################################################################################
-
+            # DRAWING LABOR
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 1, 1))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 1, 1))
 
-            ############################################################################################################
-            """FILE SETUP LABOR"""
-            ############################################################################################################
-
+            # FILE SETUP LABOR
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 2, 1.5))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 2, 1.5))
 
-            ############################################################################################################
-            """ROUTING LABOR - BACKS"""
-            ############################################################################################################
-
+            # ROUTING LABOR - BACKS
             if factors["factor1"] == 1:
-
                 sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
             else:
                 sheets = math.ceil(sum(list_of_areas) / .45 / 40)
 
             route_time = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 3, route_time))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 3, route_time))
 
-            ############################################################################################################
-            """COLOR MATCHING LABOR"""
-            ############################################################################################################
-
+            # COLOR MATCHING LABOR
             if factors["factor8"] != 0:
+                f8 = factors.get("factor8") or 0
+                f8 = float(f8)
+                color_time = (2.2392 * f8 ** 2 + 15.442 * f8 + 32.608) / 60
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (
-                component_id, 14, (2.2392 * factors["factor8"] ** 2 + 15.442 * factors["factor8"] + 32.608) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 14, color_time))
 
-            ############################################################################################################
-            """PRINTING LABOR"""
-            ############################################################################################################
-
-            if factors["factor7"] == 1 or factors["factor7"] == 4 or factors["factor7"] == 5:
+            # PRINTING LABOR
+            if factors["factor7"] in (1, 4, 5):
                 sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 print_time = sheets * (.1533 * (sum(list_of_areas) / sheets) + 36.519) / 60
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 14, print_time))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 14, print_time))
 
-            ############################################################################################################
-            """ROUTING LABOR - FACES"""
-            ############################################################################################################
-
+            # ROUTING LABOR - FACES
             sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
-            route_time = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
-
+            route_time_faces = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 3, route_time))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 3, route_time_faces))
 
-            ############################################################################################################
-            """VINYL CUTTING LABOR"""
-            ############################################################################################################
-
-            if factors['factor7'] == 2 or factors['factor7'] == 3 or factors['factor7'] == 4 or factors['factor7'] == 5:
+            # VINYL CUTTING LABOR
+            if factors["factor7"] in (2, 3, 4, 5):
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 13, (10 + .0081 * sum(list_of_perimeters)) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 13, (10 + .0081 * sum(list_of_perimeters)) / 60))
 
-            ############################################################################################################
-            """VINYL APPLICATION LABOR"""
-            ############################################################################################################
-
-            if factors['factor7'] == 2 or factors['factor7'] == 3 or factors['factor7'] == 4 or factors['factor7'] == 5:
+            # VINYL APPLICATION LABOR
+            if factors["factor7"] in (2, 3, 4, 5):
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 13, (10 * len(list_of_perimeters)) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 13, (10 * len(list_of_perimeters)) / 60))
 
-            ############################################################################################################
-            """TRIMCAP LABOR"""
-            ############################################################################################################
-
-            if factors['factor6'] == 1:
+            # TRIMCAP LABOR
+            if factors["factor6"] == 1:
                 values = [i ** 2 / j for i, j in zip(list_of_perimeters, list_of_areas)]
-
                 trimcap_labor = sum([max(10, (17.135 * math.log(i) - 35.446)) for i in values]) / 60
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 8, trimcap_labor))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 8, trimcap_labor))
 
-            ############################################################################################################
-            """AUTOBENDER LABOR"""
-            ############################################################################################################
-
+            # AUTOBENDER LABOR
             autobender_labor = sum([.0224 * i + 2.4177 for i in list_of_perimeters]) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 4, autobender_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 4, autobender_labor))
 
-            ############################################################################################################
-            """REMOVE COIL PLASTIC LABOR"""
-            ############################################################################################################
-
+            # REMOVE COIL PLASTIC LABOR
             coil_plastic_labor = sum([max(1.7329 * math.log(i) - 4.054, 1) for i in list_of_perimeters]) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 4, coil_plastic_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 4, coil_plastic_labor))
 
-            ############################################################################################################
-            """ATTACH COIL TO BACKS LABOR"""
-            ############################################################################################################
-
-            attach_coil_labor = sum([.0003 * i ** - 0.037 * i + 3.1456 for i in list_of_perimeters]) / 60
-
+            # ATTACH COIL TO BACKS LABOR
+            attach_coil_labor = sum([.0003 * i ** -0.037 * i + 3.1456 for i in list_of_perimeters]) / 60
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 10, attach_coil_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, attach_coil_labor))
 
-            ############################################################################################################
-            """INSTALL LEDS LABOR"""
-            ############################################################################################################
-
+            # INSTALL LEDS LABOR
             install_LEDs_labor = sum([.0024 * i ** 2 + 1.1666 * i + 3.2765 for i in list_of_modules]) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 10, install_LEDs_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, install_LEDs_labor))
 
-            ############################################################################################################
-            """SILICONE LEDS LABOR"""
-            ############################################################################################################
-
+            # SILICONE LEDS LABOR
             silicone_LEDs_labor = sum([max(.5, 3.2445 * math.log(i) - 3.5799) for i in list_of_modules]) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 10, silicone_LEDs_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, silicone_LEDs_labor))
 
-            ############################################################################################################
-            """CAULK SIDEWALLS LABOR"""
-            ############################################################################################################
-
+            # CAULK SIDEWALLS LABOR
             caulking_labor = sum([.0003 * i ** 2 - .0485 * i + 3.6158 for i in list_of_perimeters]) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 10, caulking_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, caulking_labor))
 
-            ############################################################################################################
-            """ASSEMBLE FACES LABOR"""
-            ############################################################################################################
-
+            # ASSEMBLE FACES LABOR
             assemble_faces_labor = 1.5 * len(list_of_perimeters) / 60
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 10, assemble_faces_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, assemble_faces_labor))
 
-            ############################################################################################################
-            """ROUTING LABOR - RETAINER LANDINGS"""
-            ############################################################################################################
-
+            # ROUTING LABOR - RETAINER LANDINGS
             if factors["factor6"] == 2:
                 sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
-                route_time = (sheets * (.0081 * (sum(list_of_perimeters) * 2.1) / sheets) + 30.736) / 60
-
+                route_time_ret = (sheets * (.0081 * (sum(list_of_perimeters) * 2.1) / sheets) + 30.736) / 60
                 cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 3, route_time))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 3, route_time_ret))
 
-            ############################################################################################################
-            """SHEARING LABOR - RETAINER RETURNS"""
-            ############################################################################################################
-
+            # SHEARING LABOR - RETAINER RETURNS
             if factors["factor6"] == 2:
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 7, sum(list_of_perimeters) / 10 * 5.5 / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, sum(list_of_perimeters) / 10 * 5.5 / 60))
 
-            ############################################################################################################
-            """FAB RETAINERS LABOR"""
-            ############################################################################################################
-
+            # FAB RETAINERS LABOR
             if factors["factor6"] == 2:
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 7, sum(list_of_perimeters) * 2 / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, sum(list_of_perimeters) * 2 / 60))
 
-            ############################################################################################################
-            """PAINT AND PAINT PREP LABOR"""
-            ############################################################################################################
-
+            # PAINT AND PAINT PREP LABOR
             if paint_area != 0:
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 11, max(paint_area / 60, 1)))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 11, max(paint_area / 60, 1)))
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 12, max(paint_area / 60, 1)))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 12, max(paint_area / 60, 1)))
 
-            ############################################################################################################
-            """PRODUCE PATTERN LABOR"""
-            ############################################################################################################
-
+            # PRODUCE PATTERN LABOR
             cursor.execute("""
-                                INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 5, .5))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 5, .5))
 
-            ############################################################################################################
-            """RACEWAY LABOR"""
-            ############################################################################################################
-
+            # RACEWAY LABOR
             if factors["factor5"] != 1:
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 7, 20 / 60))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, 20 / 60))
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 7, 10 / 60))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, 10 / 60))
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 10, len(list_of_perimeters) * 15 / 60))
-
-            ################################################################################################################
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 10, len(list_of_perimeters) * 15 / 60))
 
             conn.commit()
             cursor.close()
             conn.close()
 
-            # ✅ Update totals
+            # Update totals
             update_component_totals(component_id)
 
             # Fetch new totals for display
-            component_row_conn = pyodbc.connect(CONN_STR)
-            component_cursor = component_row_conn.cursor()
-            component_cursor.execute("""
-                            SELECT unit_cost, unit_price 
-                            FROM Components 
-                            WHERE component_ID = ?
-                        """, (component_id,))
-            uc, up = component_cursor.fetchone()
-            component_cursor.close()
-            component_row_conn.close()
+            comp_conn = get_db_connection()
+            comp_cur = comp_conn.cursor()
+            comp_cur.execute("""
+                SELECT unit_cost, unit_price 
+                FROM "Components" 
+                WHERE "component_ID" = %s
+            """, (component_id,))
+            uc, up = comp_cur.fetchone()
+            comp_cur.close()
+            comp_conn.close()
 
             context["component_unit_cost"] = uc
             context["component_unit_price"] = up
@@ -5517,25 +5846,67 @@ def quote_component(component_id, component_type_id):
                 component_labor=get_component_labor(component_id),
             )
 
-            # ✅ Render same quoting template for both customer or opp
             return render_template_string(QUOTE_CUSTOM_SIGN, **context)
 
-            # ---------- GET request ----------
-            # ✅ Make sure Excel table + navigation IDs show correctly
+        # ---------- GET request ----------
         context.update(
             excel_rows=[
                 (x, y, z)
                 for x, y, z in zip(
                     (getattr(row, "factor25", "") or "").split(","),
                     (getattr(row, "factor26", "") or "").split(","),
-                    (getattr(row, "factor27", "") or "").split(",")
+                    (getattr(row, "factor27", "") or "").split(","),
                 )
                 if x or y or z
             ],
         )
         return render_template_string(QUOTE_FACE_LIT_CHANNEL_LETTERS_COMPONENT, **context)
 
-    elif component_type_id == 6:  # Reverse Lit Channel Letters
+    # =====================================================================
+    #  component_type_id == 6 → REVERSE LIT CHANNEL LETTERS
+    # =====================================================================
+    elif component_type_id == 6:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+                    SELECT 
+                        li."opportunity_ID",
+                        o."customer_ID"
+                    FROM "Components" c
+                    JOIN "Line_Items" li ON li."line_ID" = c."line_ID"
+                    JOIN "Opportunities" o ON o."opportunity_ID" = li."opportunity_ID"
+                    WHERE c."component_ID" = %s
+                """, (component_id,))
+
+        row_ids = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if row_ids:
+            opportunity_id, customer_id = row_ids
+        else:
+            opportunity_id, customer_id = None, None
+
+        # Allow overrides passed in the URL or form (from Back buttons)
+        form_opp = request.form.get("opportunity_id") or request.args.get("opportunity_id")
+        form_cust = request.form.get("customer_id") or request.args.get("customer_id")
+
+        if form_opp not in (None, "", "None"):
+            try:
+                opportunity_id = int(form_opp)
+            except:
+                pass
+
+        if form_cust not in (None, "", "None"):
+            try:
+                customer_id = int(form_cust)
+            except:
+                pass
+
+        # Push into template context early so POST and GET routes both have them
+        context.update(customer_id=customer_id, opportunity_id=opportunity_id)
+
         if request.method == "POST":
             file = request.files.get("excel_file")
 
@@ -5545,15 +5916,14 @@ def quote_component(component_id, component_type_id):
             modules_str, areas_str, perimeters_str = None, None, None
             modules, areas, perimeters = [], [], []
 
-            # ------------------------------
-            # 🔹 Process Excel if uploaded
-            # ------------------------------
             if file and file.filename:
                 temp_path = os.path.join(tempfile.gettempdir(), file.filename)
                 file.save(temp_path)
 
                 wb = load_workbook(temp_path, data_only=True)
                 if "Sheet2" not in wb.sheetnames:
+                    wb.close()
+                    os.remove(temp_path)
                     return "Excel file missing Sheet2", 400
                 sheet = wb["Sheet2"]
 
@@ -5568,22 +5938,16 @@ def quote_component(component_id, component_type_id):
                 wb.close()
                 os.remove(temp_path)
 
-                # Convert to strings for DB
                 modules_str = ",".join(str(x) for x in modules)
                 areas_str = ",".join(str(x) for x in areas)
                 perimeters_str = ",".join(str(x) for x in perimeters)
 
-            # ------------------------------
-            # 🔹 Handle factors (1–8)
-            # ------------------------------
+            # Handle factors (1–8)
             existing_factors = {f"factor{i}": getattr(row, f"factor{i}", None) for i in range(1, 9)}
             factors = {}
             for i in range(1, 9):
                 val = request.form.get(f"factor{i}")
-                if val not in (None, ""):
-                    factors[f"factor{i}"] = int(val)
-                else:
-                    factors[f"factor{i}"] = existing_factors[f"factor{i}"]
+                factors[f"factor{i}"] = int(val) if val not in (None, "") else existing_factors[f"factor{i}"]
 
             # Keep previous Excel data if no new upload
             if not modules_str:
@@ -5593,504 +5957,395 @@ def quote_component(component_id, component_type_id):
             if not perimeters_str:
                 perimeters_str = getattr(row, "factor27", None)
 
-            # ------------------------------
-            # 🔹 Update DB factors
-            # ------------------------------
-            conn = pyodbc.connect(CONN_STR)
+            # Update DB factors
+            conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                       UPDATE Components
-                       SET factor1 = ?, factor2 = ?, factor3 = ?, factor4 = ?,
-                           factor5 = ?, factor6 = ?, factor7 = ?, factor8 = ?,
-                           factor25 = ?, factor26 = ?, factor27 = ?
-                       WHERE component_ID = ?
-                   """, (
+                UPDATE "Components"
+                SET factor1 = %s, factor2 = %s, factor3 = %s, factor4 = %s,
+                    factor5 = %s, factor6 = %s, factor7 = %s, factor8 = %s,
+                    factor25 = %s, factor26 = %s, factor27 = %s
+                WHERE "component_ID" = %s
+            """, (
                 factors["factor1"], factors["factor2"], factors["factor3"], factors["factor4"],
                 factors["factor5"], factors["factor6"], factors["factor7"], factors["factor8"],
                 modules_str, areas_str, perimeters_str, component_id
             ))
 
             # Clear previous materials/labor
-            cursor.execute("DELETE FROM component_MFG_Materials WHERE component_ID = ?", (component_id,))
-            cursor.execute("DELETE FROM component_MFG_Labor WHERE component_ID = ?", (component_id,))
+            cursor.execute('DELETE FROM "component_MFG_Materials" WHERE "component_ID" = %s', (component_id,))
+            cursor.execute('DELETE FROM "component_MFG_Labor"     WHERE "component_ID" = %s', (component_id,))
 
-            # ------------------------------
-            # 🔹 Core Calculations (unchanged)
-            # ------------------------------
+            # Core Calculations
             list_of_modules = [float(x) for x in (modules_str or "").split(",") if x not in ("", "0", None)]
             list_of_areas = [float(x) for x in (areas_str or "").split(",") if x not in ("", "0", None)]
             list_of_perimeters = [float(x) for x in (perimeters_str or "").split(",") if x not in ("", "0", None)]
 
             ############################################################################################################
-            ############################################################################################################
-            """CODE FOR MATERIALS"""
-            ############################################################################################################
+            """ CODE FOR MATERIALS """
             ############################################################################################################
 
-            ############################################################################################################
-            """CODE FOR LETTER FACES"""
-            ############################################################################################################
-
+            # LETTER FACES
             _090_SHEETS = math.ceil(sum(list_of_areas) / .45 / 32)
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                """, (component_id, 6, _090_SHEETS))
+                INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 6, _090_SHEETS))
 
-            ############################################################################################################
-            """CODE FOR COIL"""
-            ############################################################################################################
-
+            # COIL
             _3in_coil = math.ceil(sum(list_of_perimeters))
-
             cursor.execute("""
-                                INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                VALUES (?, ?, ?)
-                                """, (component_id, 59, _3in_coil))
+                INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 59, _3in_coil))
 
-            ############################################################################################################
-            """CODE FOR RACEWAYS"""
-            ############################################################################################################
-
+            # RACEWAYS
             if factors["factor4"] == 2:
                 inserts = [
                     (component_id, 71, 1),
                     (component_id, 72, 1),
                     (component_id, 73, 2),
-                    (component_id, 77, 7)
+                    (component_id, 77, 7),
                 ]
-
                 cursor.executemany("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, inserts)
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, inserts)
 
             elif factors["factor4"] == 3:
                 inserts = [
                     (component_id, 74, 1),
                     (component_id, 75, 1),
                     (component_id, 76, 2),
-                    (component_id, 77, 7)
+                    (component_id, 77, 7),
                 ]
-
                 cursor.executemany("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, inserts)
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, inserts)
 
-            ############################################################################################################
-            """CODE FOR BACKS"""
-            ############################################################################################################
-
+            # BACKS
             if factors["factor1"] == 4:
-
                 white_acrylic_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                    """, (component_id, 39, white_acrylic_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 39, white_acrylic_sheets))
 
             elif factors["factor1"] == 3:
-
                 clear_acrylic_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                    """, (component_id, 40, clear_acrylic_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 40, clear_acrylic_sheets))
 
             elif factors["factor1"] == 2:
-
                 white_poly_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                    """, (component_id, 43, white_poly_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 43, white_poly_sheets))
 
             elif factors["factor1"] == 1:
                 clear_poly_sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                    """, (component_id, 44, clear_poly_sheets))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 44, clear_poly_sheets))
 
-            ############################################################################################################
-            """CODE FOR LEDS/PS"""
-            ############################################################################################################
-
+            # LEDS/PS
             inserts = [
                 (component_id, 49, math.ceil(sum(list_of_modules) / 200)),
                 (component_id, 52, math.ceil(sum(list_of_modules) * .461 / 60)),
                 (component_id, 54, 1),
-                (component_id, 55, 1)
+                (component_id, 55, 1),
             ]
-
             if factors["factor4"] == 1:
                 inserts.append(
-                    (component_id, 56, math.ceil(math.ceil(sum(list_of_modules) * .461 / 60)) / 2))
-                inserts.append((component_id, 57, len(list_of_perimeters)))
-
-            else:
-                inserts.append(
-                    (component_id, 57, 1)
+                    (component_id, 56, math.ceil(math.ceil(sum(list_of_modules) * .461 / 60)) / 2)
                 )
+                inserts.append(
+                    (component_id, 57, len(list_of_perimeters))
+                )
+            else:
+                inserts.append((component_id, 57, 1))
 
             cursor.executemany("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, inserts)
+                INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, inserts)
 
-            ############################################################################################################
-            """CODE FOR INK/VINYL"""
-            ############################################################################################################
-
-            if factors["factor2"] == 3 or factors["factor2"] == 4:
+            # INK/VINYL
+            if factors["factor2"] in (3, 4):
                 ml_ink = math.ceil(sum(list_of_areas))
-
                 cursor.execute("""
-                                            INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                            VALUES (?, ?, ?)
-                                            """, (component_id, 45, ml_ink))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 45, ml_ink))
 
-            if factors["factor3"] == 3 or factors["factor2"] == 4:
+            if factors["factor3"] in (3, 4):
                 ml_ink = math.ceil(sum(list_of_areas))
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 45, ml_ink))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 45, ml_ink))
 
             if factors["factor2"] == 2 or factors["factor7"] == 3:
                 sqft_vinyl = math.ceil(sum(list_of_areas) / .45 / 32) * 32
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 46, sqft_vinyl))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 46, sqft_vinyl))
 
-            if factors["factor3"] == 2 or factors["factor3"] == 3:
+            if factors["factor3"] in (2, 3):
                 sqft_vinyl = math.ceil(sum(list_of_areas) / .45 / 32) * 32
-
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 46, sqft_vinyl))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 46, sqft_vinyl))
 
-            ############################################################################################################
-            """CODE FOR PAINT"""
-            ############################################################################################################
-
+            # PAINT
             paint_area = 0
-
             paint_area += sum(list_of_areas) + sum(list_of_perimeters) * .5
 
             if factors["factor4"] == 2:
                 paint_area += 24.5 * 2
-
             if factors["factor4"] == 3:
                 paint_area += 24.5 * 2.5
 
             if paint_area != 0:
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 48, paint_area))
+                    INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 48, paint_area))
 
             ############################################################################################################
-            ############################################################################################################
-            """CODE FOR LABOR"""
-            ############################################################################################################
+            """ CODE FOR LABOR """
             ############################################################################################################
 
-            ############################################################################################################
-            """DRAWING LABOR"""
-            ############################################################################################################
-
+            # DRAWING
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 1, 1))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 1, 1))
 
-            ############################################################################################################
-            """FILE SETUP LABOR"""
-            ############################################################################################################
-
+            # FILE SETUP
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 2, 1.5))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 2, 1.5))
 
-            ############################################################################################################
-            """ROUTING LABOR - BACKS"""
-            ############################################################################################################
-
+            # ROUTING BACKS
             sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
             route_time = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
-
             cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                    """, (component_id, 3, route_time))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 3, route_time))
 
-            ############################################################################################################
-            """COLOR MATCHING LABOR"""
-            ############################################################################################################
-
-            if factors["factor2"] != 3 or factors["factor2"] != 4 or factors["factor3"] != 3 or factors["factor3"] != 4:
+            # COLOR MATCHING
+            if not (factors["factor2"] in (3, 4) or factors["factor3"] in (3, 4)):
+                f2 = factors.get("factor2") or 0
+                f3 = factors.get("factor3") or 0
+                try:
+                    f2 = float(f2)
+                except:
+                    f2 = 0.0
+                try:
+                    f3 = float(f3)
+                except:
+                    f3 = 0.0
+                if not (f2 in (3, 4) or f3 in (3, 4)):
+                    f_sum = f2 + f3
+                    color_time = (2.2392 * f_sum ** 2 + 15.442 * f_sum + 32.608) / 60
                 cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                        """, (
-                    component_id, 14, (2.2392 * factors["factor8"] ** 2 + 15.442 * factors["factor8"] + 32.608) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 14, color_time))
 
-            ############################################################################################################
-            """PRINTING LABOR"""
-            ############################################################################################################
-
-            if factors["factor2"] != 3 or factors["factor2"] != 4 or factors["factor3"] != 3 or factors["factor3"] != 4:
+            # PRINTING
+            if not (factors["factor2"] in (3, 4) or factors["factor3"] in (3, 4)):
                 sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
                 print_time = sheets * (.1533 * (sum(list_of_areas) / sheets) + 36.519) / 60
-
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 14, print_time))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 14, print_time))
 
-            ############################################################################################################
-            """ROUTING LABOR - FACES"""
-            ############################################################################################################
-
+            # ROUTING FACES
             sheets = math.ceil(sum(list_of_areas) / .45 / 32)
-
-            route_time = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
-
+            route_time_faces = sheets * (.0081 * (sum(list_of_perimeters) / sheets) + 30.736) / 60
             cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 3, route_time))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 3, route_time_faces))
 
-            ############################################################################################################
-            """VINYL CUTTING LABOR"""
-            ############################################################################################################
-
-            if factors['factor7'] == 2 or factors['factor7'] == 3 or factors['factor7'] == 4 or factors['factor7'] == 5:
+            # VINYL CUTTING
+            if factors["factor7"] in (2, 3, 4, 5):
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 13, (10 + .0081 * sum(list_of_perimeters)) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 13, (10 + .0081 * sum(list_of_perimeters)) / 60))
 
-            ############################################################################################################
-            """VINYL APPLICATION LABOR"""
-            ############################################################################################################
-
-            if factors['factor7'] == 2 or factors['factor7'] == 3 or factors['factor7'] == 4 or factors['factor7'] == 5:
+            # VINYL APPLICATION
+            if factors["factor7"] in (2, 3, 4, 5):
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 13, (10 * len(list_of_perimeters)) / 60))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 13, (10 * len(list_of_perimeters)) / 60))
 
-            ############################################################################################################
-            """AUTOBENDER LABOR"""
-            ############################################################################################################
-
+            # AUTOBENDER
             autobender_labor = sum([.0224 * i + 2.4177 for i in list_of_perimeters]) / 60
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 4, autobender_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 4, autobender_labor))
 
-            ############################################################################################################
-            """REMOVE COIL PLASTIC LABOR"""
-            ############################################################################################################
-
+            # REMOVE COIL PLASTIC
             coil_plastic_labor = sum([max(1.7329 * math.log(i) - 4.054, 1) for i in list_of_perimeters]) / 60
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 4, coil_plastic_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 4, coil_plastic_labor))
 
-            ############################################################################################################
-            """WELD RETURNS TO FACES LABOR"""
-            ############################################################################################################
-
+            # WELD RETURNS TO FACES
             attach_coil_labor = sum(list_of_perimeters) * 12 / 60 / 2
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 7, attach_coil_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 7, attach_coil_labor))
 
-            ############################################################################################################
-            """PAINT AND PAINT PREP LABOR"""
-            ############################################################################################################
-
+            # PAINT & PAINT PREP
             if paint_area != 0:
-
                 cursor.execute("""
-                                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 11, max(paint_area / 60, 1)))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 11, max(paint_area / 60, 1)))
                 cursor.execute("""
-                                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 12, max(paint_area / 60, 1)))
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 12, max(paint_area / 60, 1)))
 
-            ############################################################################################################
-            """PAINT AND PAINT PREP LABOR"""
-            ############################################################################################################
-
+            # PAINT AREA (extra)
             cursor.execute("""
-                                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                                    VALUES (?, ?, ?)
-                                                    """, (component_id, 11, sum(list_of_areas) / 60))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 11, sum(list_of_areas) / 60))
 
-            ############################################################################################################
-            """INSTALL LEDS LABOR"""
-            ############################################################################################################
-
+            # INSTALL LEDS
             install_LEDs_labor = sum([.0024 * i ** 2 + 1.1666 * i + 3.2765 for i in list_of_modules]) / 60
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 10, install_LEDs_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, install_LEDs_labor))
 
-            ############################################################################################################
-            """SILICONE LEDS LABOR"""
-            ############################################################################################################
-
+            # SILICONE LEDS
             silicone_LEDs_labor = sum([max(.5, 3.2445 * math.log(i) - 3.5799) for i in list_of_modules]) / 60
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 10, silicone_LEDs_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, silicone_LEDs_labor))
 
-            ############################################################################################################
-            """ASSEMBLE LETTERS"""
-            ############################################################################################################
-
+            # ASSEMBLE LETTERS
             assemble_letters_labor = math.ceil(sum(list_of_perimeters) * 12 / 8) / 60 * 2
-
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 10, assemble_letters_labor))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 10, assemble_letters_labor))
 
-            ############################################################################################################
-            """PRODUCE PATTERN LABOR"""
-            ############################################################################################################
-
+            # PRODUCE PATTERN
             cursor.execute("""
-                                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                    VALUES (?, ?, ?)
-                                    """, (component_id, 5, .5))
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                VALUES (%s, %s, %s)
+            """, (component_id, 5, .5))
 
-            ############################################################################################################
-            """RACEWAY LABOR"""
-            ############################################################################################################
-
+            # RACEWAY LABOR
             if factors["factor4"] != 1:
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 7, 20 / 60))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, 20 / 60))
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 7, 10 / 60))
-
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 7, 10 / 60))
                 cursor.execute("""
-                                        INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                                        VALUES (?, ?, ?)
-                                        """, (component_id, 10, len(list_of_perimeters) * 15 / 60))
-
-            ################################################################################################################
+                    INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                    VALUES (%s, %s, %s)
+                """, (component_id, 10, len(list_of_perimeters) * 15 / 60))
 
             conn.commit()
-            update_component_totals(component_id)
+            cursor.close()
             conn.close()
 
-            # ------------------------------
-            # 🔹 Refresh context
-            # ------------------------------
-            comp_conn = pyodbc.connect(CONN_STR)
+            update_component_totals(component_id)
+
+            # Refresh context
+            comp_conn = get_db_connection()
             c = comp_conn.cursor()
-            c.execute("SELECT unit_cost, unit_price FROM Components WHERE component_ID = ?", (component_id,))
+            c.execute("""
+                SELECT unit_cost, unit_price 
+                FROM "Components" 
+                WHERE "component_ID" = %s
+            """, (component_id,))
             uc, up = c.fetchone()
             comp_conn.close()
 
             context["component_unit_cost"] = uc
             context["component_unit_price"] = up
 
-            # Reload material/labor data for quoting screen
             context.update(
                 materials=get_materials(),
                 labor_types=get_labor_types(),
                 component_materials=get_component_materials(component_id),
-                component_labor=get_component_labor(component_id)
+                component_labor=get_component_labor(component_id),
             )
 
-            # ✅ Determine navigation target
             customer_id = request.form.get("customer_id", type=int)
             opportunity_id = request.form.get("opportunity_id", type=int)
             context.update(customer_id=customer_id, opportunity_id=opportunity_id)
 
             return render_template_string(QUOTE_CUSTOM_SIGN, **context)
 
-            # ------------------------------
-            # 🔹 GET request: show UI
-            # ------------------------------
+        # GET request
         context.update(
             excel_rows=[
                 (x, y, z)
                 for x, y, z in zip(
                     (getattr(row, "factor25", "") or "").split(","),
                     (getattr(row, "factor26", "") or "").split(","),
-                    (getattr(row, "factor27", "") or "").split(",")
+                    (getattr(row, "factor27", "") or "").split(","),
                 )
                 if any([x, y, z]) and not (x == "0" and y == "0" and z == "0")
             ]
         )
-
         return render_template_string(QUOTE_REVERSE_LIT_CHANNEL_LETTERS_COMPONENT, **context)
 
-    ########################################################################################################################
-    ########################################################################################################################
-    ########################################################################################################################
-
+    # =====================================================================
+    #  component_type_id == 8 → MASONRY
+    # =====================================================================
     elif component_type_id == 8:
         component_masonry = get_component_masonry(component_id)
         context.update(component_masonry=component_masonry)
         return render_template_string(QUOTE_MASONRY, **context)
 
-    elif component_type_id == 9:  # RENTAL EQUIPMENT
+    # =====================================================================
+    #  component_type_id == 9 → RENTAL EQUIPMENT
+    # =====================================================================
+    elif component_type_id == 9:
         component_rental_equipment = get_component_rental_equipment(component_id)
 
-        # Try to fetch correct IDs from request or context
         opportunity_id = (
-                request.args.get("opportunity_id", type=int)
-                or context.get("opportunity_id")
-                or getattr(context.get("line_item", {}), "opportunity_ID", 0)
-                or 0
+            request.args.get("opportunity_id", type=int)
+            or context.get("opportunity_id")
+            or 0
         )
         customer_id = (
-                request.args.get("customer_id", type=int)
-                or context.get("customer_id")
-                or 0
+            request.args.get("customer_id", type=int)
+            or context.get("customer_id")
+            or 0
         )
 
-        # ✅ Update context so template knows where to go back to
         context.update(
             component_rental_equipment=component_rental_equipment,
             opportunity_id=opportunity_id,
@@ -6099,11 +6354,13 @@ def quote_component(component_id, component_type_id):
 
         return render_template_string(QUOTE_RENTAL_EQUIPMENT, **context)
 
-    elif component_type_id == 10:  # Manual Price Entry
+    # =====================================================================
+    #  component_type_id == 10 → MANUAL PRICE ENTRY
+    # =====================================================================
+    elif component_type_id == 10:
         if request.method == "POST":
             from decimal import Decimal, InvalidOperation
 
-            # Get inputs
             price_raw = (request.form.get("unit_price") or "").strip().replace(",", "")
             customer_id = request.form.get("customer_id", type=int)
             opportunity_id = request.form.get("opportunity_id", type=int)
@@ -6114,43 +6371,46 @@ def quote_component(component_id, component_type_id):
                 new_price = None
 
             if new_price is not None:
-                conn = pyodbc.connect(CONN_STR)
+                conn = get_db_connection()
                 cur = conn.cursor()
 
-                # Update component price directly
                 cur.execute("""
-                    UPDATE Components
-                    SET unit_price = ?, unit_cost = ?
-                    WHERE component_ID = ?
+                    UPDATE "Components"
+                    SET unit_price = %s, unit_cost = %s
+                    WHERE "component_ID" = %s
                 """, (new_price, new_price, component_id))
-                conn.commit()
 
-                # Get line_ID for rollup
-                cur.execute("SELECT line_ID FROM Components WHERE component_ID = ?", (component_id,))
+                cur.execute("""
+                    SELECT "line_ID"
+                    FROM "Components"
+                    WHERE "component_ID" = %s
+                """, (component_id,))
                 line_row = cur.fetchone()
-                line_id = int(line_row.line_ID) if line_row else None
+                line_id = int(line_row[0]) if line_row else None
 
+                conn.commit()
                 conn.close()
 
-                # ✅ Use your existing route helper instead of adding a new function
                 if line_id:
                     update_line_item_totals_from_components(line_id)
 
-            # ✅ Redirect correctly
             if customer_id:
                 return redirect(
-                    url_for("customer_detail_route", customer_id=customer_id, show_popup=True, line_id=line_id))
+                    url_for("customer_detail_route", customer_id=customer_id, show_popup=True, line_id=line_id)
+                )
             elif opportunity_id:
                 return redirect(
-                    url_for("show_opportunity_route", opportunity_id=opportunity_id, show_popup=True, line_id=line_id))
+                    url_for("show_opportunity_route", opportunity_id=opportunity_id, show_popup=True, line_id=line_id)
+                )
             else:
                 return redirect(url_for("index"))
 
-        # ---------- GET request ----------
         return render_template_string(QUOTE_MANUAL_PRICE_ENTRY, **context)
 
-
-    else:  # CUSTOM SIGN
+    # =====================================================================
+    #  DEFAULT → CUSTOM SIGN
+    # =====================================================================
+    else:
         materials = get_materials()
         labor_types = get_labor_types()
         component_materials = get_component_materials(component_id)
@@ -6170,12 +6430,11 @@ def quote_component(component_id, component_type_id):
         else:
             context["hide_back_button"] = False
 
-        # Try to fetch a customer_id if possible
         customer_id = (
-                locals().get("customer_id")
-                or context.get("customer_id")
-                or getattr(row, "customer_id", None)
-                or 0  # fallback
+            locals().get("customer_id")
+            or context.get("customer_id")
+            or getattr(row, "customer_id", None)
+            or 0
         )
         context["customer_id"] = customer_id or 0
         context["hide_back_button"] = bool(customer_id)
@@ -6194,22 +6453,31 @@ def quote_component(component_id, component_type_id):
 def update_component_quantity(component_id):
     new_qty = float(request.form.get("quantity", 0))
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()   # <-- your psycopg2 connection
     cursor = conn.cursor()
+
+    # Update quantity
     cursor.execute("""
-        UPDATE Components
-        SET quantity = ?
-        WHERE component_ID = ?
+        UPDATE "Components"
+        SET quantity = %s
+        WHERE "component_ID" = %s
     """, (new_qty, component_id))
     conn.commit()
 
-    # get parent line item
-    cursor.execute("SELECT line_ID FROM Components WHERE component_ID = ?", (component_id,))
-    line_id = cursor.fetchone().line_ID
+    # Get parent line item
+    cursor.execute("""
+        SELECT "line_ID" 
+        FROM "Components" 
+        WHERE "component_ID" = %s
+    """, (component_id,))
+    row = cursor.fetchone()
+    line_id = row[0] if row else None
+
     conn.close()
 
-    # update totals
-    update_line_item_totals(line_id)
+    # Update totals
+    if line_id:
+        update_line_item_totals(line_id)
 
     opportunity_id = get_opportunity_id_by_line(line_id)
     return redirect(url_for("show_opportunity_route", opportunity_id=opportunity_id))
@@ -6234,19 +6502,23 @@ def add_install_material(component_id):
     unit_cost = float(request.form["unit_cost"])
     qty = float(request.form["quantity"])
 
-    conn = pyodbc.connect(CONN_STR)
+    # 🔄 Use Postgres connection (NOT pyodbc)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO Component_Install_Materials (component_ID, material_description, material_unit, unit_cost, quantity)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO "component_install_Materials"
+        ("component_ID", material_description, material_unit, unit_cost, quantity)
+        VALUES (%s, %s, %s, %s, %s)
     """, (component_id, description, unit, unit_cost, qty))
+
     conn.commit()
     conn.close()
 
     # ✅ Recalculate totals for the component
     update_install_component_totals(component_id)
 
-    # 🔁 Preserve context
+    # 🔁 Preserve navigation context
     customer_id = request.form.get("customer_id", type=int)
     opportunity_id = request.form.get("opportunity_id", type=int)
 
@@ -6280,16 +6552,20 @@ def add_install_labor(component_id):
     labor_id = int(request.form["install_labor_id"])
     qty = float(request.form["quantity"])
 
-    conn = pyodbc.connect(CONN_STR)
+    # 🔄 Use Postgres connection (not pyodbc)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO Component_Install_Labor (component_ID, install_labor_ID, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO "component_install_Labor"
+        ("component_ID", "install_labor_ID", quantity)
+        VALUES (%s, %s, %s)
     """, (component_id, labor_id, qty))
+
     conn.commit()
     conn.close()
 
-    # ✅ Recalculate totals for the component
+    # 🔄 Recalculate totals
     update_install_component_totals(component_id)
 
     # 🔁 Preserve context
@@ -6319,34 +6595,38 @@ def add_install_labor(component_id):
 
 ########################################################################################################################
 
+"""ROUTE TO ADD SUBCONTRATOR INSTALL COSTS"""
+
 @app.route("/component/<int:component_id>/add_sub_install_cost", methods=["POST"])
 def add_sub_install_cost(component_id):
     subcontractor_cost = float(request.form["subcontractor_cost"] or 0)
 
-    # Preserve context for proper back navigation
+    # Preserve navigation context
     customer_id = request.form.get("customer_id")
     opportunity_id = request.form.get("opportunity_id")
 
-    conn = pyodbc.connect(CONN_STR)
+    # 🔄 Connect to PostgreSQL
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Insert subcontractor cost
+    # INSERT subcontractor install cost
     cursor.execute("""
-        INSERT INTO subcontractor_install_cost (component_ID, subcontractor_cost)
-        VALUES (?, ?)
+        INSERT INTO "subcontractor_install_cost"
+        ("component_ID", "subcontractor_cost")
+        VALUES (%s, %s)
     """, (component_id, subcontractor_cost))
 
     conn.commit()
     conn.close()
 
-    # 🔥 REQUIRED: Recalculate installation totals
+    # 🔥 Recalculate totals
     update_install_component_totals(component_id)
 
-    # Go back to the correct installation component screen
+    # Redirect back to installation component screen
     return redirect(url_for(
         "quote_component",
         component_id=component_id,
-        component_type_id=2,   # ← Correct install component type
+        component_type_id=2,
         customer_id=customer_id,
         opportunity_id=opportunity_id
     ))
@@ -6357,35 +6637,62 @@ def add_sub_install_cost(component_id):
 
 @app.route("/installation/<int:component_id>")
 def show_installation(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Materials
+    # ----------------------------
+    # MATERIALS
+    # ----------------------------
     cursor.execute("""
-        SELECT material_description, material_unit, quantity, unit_cost
-        FROM compoent_install_Materials
-        WHERE component_id = ?
+        SELECT 
+            "material_description",
+            "material_unit",
+            "quantity",
+            "unit_cost"
+        FROM "component_install_Materials"
+        WHERE "component_ID" = %s
     """, (component_id,))
     component_install_materials = cursor.fetchall()
 
-    cursor.execute("SELECT COALESCE(SUM(quantity * unit_cost), 0) FROM Install_Materials WHERE component_id = ?",
-                   (component_id,))
+    cursor.execute("""
+        SELECT COALESCE(SUM("quantity" * "unit_cost"), 0)
+        FROM "component_install_Materials"
+        WHERE "component_ID" = %s
+    """, (component_id,))
     install_material_cost = cursor.fetchone()[0]
 
-    # Labor
+    # ----------------------------
+    # LABOR
+    # ----------------------------
     cursor.execute("""
-        SELECT install_labor_type, quantity, burden_rate
-        FROM Install_Labor
-        WHERE component_id = ?
+        SELECT 
+            il."install_labor_type",
+            cil."quantity",
+            il."burden_rate"
+        FROM "component_install_Labor" cil
+        INNER JOIN "Install_Labor_Types" il
+            ON cil."install_labor_ID" = il."install_labor_ID"
+        WHERE cil."component_ID" = %s
     """, (component_id,))
     component_install_labor = cursor.fetchall()
 
-    cursor.execute("SELECT COALESCE(SUM(quantity * unit_cost), 0) FROM Install_Labor WHERE component_id = ?",
-                   (component_id,))
+    cursor.execute("""
+        SELECT COALESCE(SUM(cil."quantity" * il."burden_rate"), 0)
+        FROM "component_install_Labor" cil
+        INNER JOIN "Install_Labor_Types" il
+            ON cil."install_labor_ID" = il."install_labor_ID"
+        WHERE cil."component_ID" = %s
+    """, (component_id,))
     install_labor_cost = cursor.fetchone()[0]
 
-    # Totals already updated by update_component_totals_install
-    cursor.execute("SELECT unit_cost, unit_price FROM Components WHERE component_ID = ?", (component_id,))
+    # ----------------------------
+    # COMPONENT TOTALS (already updated elsewhere)
+    # ----------------------------
+    cursor.execute("""
+        SELECT "unit_cost", "unit_price"
+        FROM "Components"
+        WHERE "component_ID" = %s
+    """, (component_id,))
     component_unit_cost, component_unit_price = cursor.fetchone()
 
     conn.close()
@@ -6398,8 +6705,7 @@ def show_installation(component_id):
         install_labor_cost=install_labor_cost,
         component_unit_cost=component_unit_cost,
         component_unit_price=component_unit_price,
-        component_id=component_id,
-        # plus opportunity_id, line_id, etc
+        component_id=component_id
     )
 
 ########################################################################################################################
@@ -6408,27 +6714,30 @@ def show_installation(component_id):
 
 @app.route("/add_emc_unit/<int:component_id>", methods=["POST"])
 def add_emc_unit(component_id):
-    # 🔹 Read form inputs
+    # Read form inputs
     description = request.form["EMC_description"].strip()
     unit_cost = float(request.form["unit_cost"])
     qty = float(request.form["quantity"])
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO Component_EMC (component_ID, EMC_description, unit_cost, quantity)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO "component_EMC" ("component_ID", "EMC_description", "unit_cost", "quantity")
+        VALUES (%s, %s, %s, %s)
     """, (component_id, description, unit_cost, qty))
+
     conn.commit()
     conn.close()
 
-    # ✅ Recalculate component totals
+    # Recalculate component totals
     update_emc_component_totals(component_id)
 
-    # 🔁 Preserve context (customer / opportunity)
+    # Preserve context
     customer_id = request.form.get("customer_id", type=int)
     opportunity_id = request.form.get("opportunity_id", type=int)
 
+    # Redirect correctly
     if customer_id:
         return redirect(url_for(
             "quote_component",
@@ -6458,52 +6767,64 @@ def add_emc_unit(component_id):
 def save_pipe_foundation(component_id):
     form = request.form
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # check if already exists
+    # Check if the record already exists
     cursor.execute("""
-        SELECT component_pipe_and_foundation_ID
-        FROM component_pipe_and_foundation
-        WHERE component_ID = ?
+        SELECT "component_pipe_and_foundation_ID"
+        FROM "component_pipe_and_foundation"
+        WHERE "component_ID" = %s
     """, (component_id,))
     row = cursor.fetchone()
 
-    if row:  # update
+    if row:
+        # UPDATE existing record
         cursor.execute("""
-            UPDATE component_pipe_and_foundation
-            SET base_pipe_diameter=?, base_pipe_footage=?,
-                stack_pipe1_diameter=?, stack_pipe1_footage=?,
-                stack_pipe2_diameter=?, stack_pipe2_footage=?,
-                stack_pipe3_diameter=?, stack_pipe3_footage=?,
-                stack_pipe4_diameter=?, stack_pipe4_footage=?,
-                pier_diameter=?, pier_depth=?, pier_quanitity=?,
-                rectangular_footer_length=?, rectangular_footer_width=?, rectangular_footer_depth=?,
-                digging_cost=?, concrete_cost=?, additional_footer_cost=?, pipe_cost=?
-            WHERE component_ID=?
+            UPDATE "component_pipe_and_foundation"
+            SET 
+                "base_pipe_diameter" = %s, "base_pipe_footage" = %s,
+                "stack_pipe1_diameter" = %s, "stack_pipe1_footage" = %s,
+                "stack_pipe2_diameter" = %s, "stack_pipe2_footage" = %s,
+                "stack_pipe3_diameter" = %s, "stack_pipe3_footage" = %s,
+                "stack_pipe4_diameter" = %s, "stack_pipe4_footage" = %s,
+                "pier_diameter" = %s, "pier_depth" = %s, "pier_quantity" = %s,
+                "rectangular_footer_length" = %s, 
+                "rectangular_footer_width" = %s, 
+                "rectangular_footer_depth" = %s,
+                "digging_cost" = %s, 
+                "concrete_cost" = %s, 
+                "additional_footer_cost" = %s, 
+                "pipe_cost" = %s
+            WHERE "component_ID" = %s
         """, (
             form["base_pipe_diameter"], form["base_pipe_footage"],
             form["stack_pipe1_diameter"], form["stack_pipe1_footage"],
             form["stack_pipe2_diameter"], form["stack_pipe2_footage"],
             form["stack_pipe3_diameter"], form["stack_pipe3_footage"],
             form["stack_pipe4_diameter"], form["stack_pipe4_footage"],
-            form["pier_diameter"], form["pier_depth"], form["pier_quanitity"],
+            form["pier_diameter"], form["pier_depth"], form["pier_quantity"],
             form["rectangular_footer_length"], form["rectangular_footer_width"], form["rectangular_footer_depth"],
             form["digging_cost"], form["concrete_cost"], form["additional_footer_cost"], form["pipe_cost"],
             component_id
         ))
-    else:  # insert new
+
+    else:
+        # INSERT new record
         cursor.execute("""
-            INSERT INTO component_pipe_and_foundation
-            (component_ID, base_pipe_diameter, base_pipe_footage,
-             stack_pipe1_diameter, stack_pipe1_footage,
-             stack_pipe2_diameter, stack_pipe2_footage,
-             stack_pipe3_diameter, stack_pipe3_footage,
-             stack_pipe4_diameter, stack_pipe4_footage,
-             pier_diameter, pier_depth, pier_quantity,
-             rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
-             digging_cost, concrete_cost, additional_footer_cost, pipe_cost)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO "component_pipe_and_foundation"
+            (
+                "component_ID", 
+                "base_pipe_diameter", "base_pipe_footage",
+                "stack_pipe1_diameter", "stack_pipe1_footage",
+                "stack_pipe2_diameter", "stack_pipe2_footage",
+                "stack_pipe3_diameter", "stack_pipe3_footage",
+                "stack_pipe4_diameter", "stack_pipe4_footage",
+                "pier_diameter", "pier_depth", "pier_quantity",
+                "rectangular_footer_length", "rectangular_footer_width", "rectangular_footer_depth",
+                "digging_cost", "concrete_cost", "additional_footer_cost", "pipe_cost"
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             component_id,
             form["base_pipe_diameter"], form["base_pipe_footage"],
@@ -6532,82 +6853,104 @@ def save_pipe_foundation(component_id):
 def save_pipe_foundation_factors(component_id):
     form = request.form
 
-    # convert to floats safely (default 0 if blank)
+    # --- Collect 23 numeric factors safely ---
+    factor_fields = [
+        "overall_height",
+        "head_cabinet_height",
+        "head_cabinet_width",
+        "wind_speed",
+        "exposure_type",
+        "num_pipes",
+        "pipe_yield_strength",
+        "cab2_max_height",
+        "cab2_height",
+        "cab2_width",
+        "cab3_max_height",
+        "cab3_height",
+        "cab3_width",
+        "cab4_max_height",
+        "cab4_height",
+        "cab4_width",
+        "pipe1_transition_height",
+        "pipe2_transition_height",
+        "pipe3_transition_height",
+        "pipe4_transition_height",
+        "foundation_type",
+        "rect_footer_length",
+        "rect_footer_width",
+    ]
+
     factors = []
-    for f in [
-        form.get("overall_height", 0),
-        form.get("head_cabinet_height", 0),
-        form.get("head_cabinet_width", 0),
-        form.get("wind_speed", 0),
-        form.get("exposure_type", 0),
-        form.get("num_pipes", 0),
-        form.get("pipe_yield_strength", 0),
-        form.get("cab2_max_height", 0),
-        form.get("cab2_height", 0),
-        form.get("cab2_width", 0),
-        form.get("cab3_max_height", 0),
-        form.get("cab3_height", 0),
-        form.get("cab3_width", 0),
-        form.get("cab4_max_height", 0),
-        form.get("cab4_height", 0),
-        form.get("cab4_width", 0),
-        form.get("pipe1_transition_height", 0),
-        form.get("pipe2_transition_height", 0),
-        form.get("pipe3_transition_height", 0),
-        form.get("pipe4_transition_height", 0),
-        form.get("foundation_type", 0),
-        form.get("rect_footer_length", 0),
-        form.get("rect_footer_width", 0),
-    ]:
+
+    for field in factor_fields:
+        raw = form.get(field, "").strip()
+
+        # Special handling: exposure_type must be numeric 1–4, not string
+        if field == "exposure_type":
+            # HTML select returns string "1", "2", "3", "4"
+            try:
+                factors.append(int(raw))  # keep integer 1–4
+            except:
+                factors.append(3)  # default to exposure C
+            continue
+
+        # Normal numeric fields
         try:
-            factors.append(float(f))
+            factors.append(float(raw) if raw != "" else 0.0)
         except ValueError:
             factors.append(0.0)
-    # save to DB
-    conn = pyodbc.connect(CONN_STR)
+
+    # --- Update DB (PostgreSQL syntax) ---
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE Components
-        SET factor1=?, factor2=?, factor3=?, factor4=?, factor5=?,
-            factor6=?, factor7=?, factor8=?, factor9=?, factor10=?,
-            factor11=?, factor12=?, factor13=?, factor14=?, factor15=?,
-            factor16=?, factor17=?, factor18=?, factor19=?, factor20=?,
-            factor21=?, factor22=?, factor23=?
-        WHERE component_ID=?
+
+    cursor.execute(r"""
+        UPDATE "Components"
+        SET 
+            "factor1"=%s, "factor2"=%s, "factor3"=%s, "factor4"=%s, "factor5"=%s,
+            "factor6"=%s, "factor7"=%s, "factor8"=%s, "factor9"=%s, "factor10"=%s,
+            "factor11"=%s, "factor12"=%s, "factor13"=%s, "factor14"=%s, "factor15"=%s,
+            "factor16"=%s, "factor17"=%s, "factor18"=%s, "factor19"=%s, "factor20"=%s,
+            "factor21"=%s, "factor22"=%s, "factor23"=%s
+        WHERE "component_ID"=%s
     """, (*factors, component_id))
+
     conn.commit()
     conn.close()
 
-    overall_height = factors[0]
-    head_cabinet_height = factors[1]
-    head_cabinet_width = factors[2]
-    wind_speed = factors[3]
-    exposure_type = factors[4]
-    num_pipes = factors[5]
-    pipe_yield_strength = factors[6]
-    cab2_max_height = factors[7]
-    cab2_height = factors[8]
-    cab2_width = factors[9]
-    cab3_max_height = factors[10]
-    cab3_height = factors[11]
-    cab3_width = factors[12]
-    cab4_max_height = factors[13]
-    cab4_height = factors[14]
-    cab4_width = factors[15]
-    pipe1_transition_height = factors[16]
-    pipe2_transition_height = factors[17]
-    pipe3_transition_height = factors[18]
-    pipe4_transition_height = factors[19]
-    if factors[20] == 1:
+    # --- Unpack values for further logic ---
+    (
+        overall_height,
+        head_cabinet_height,
+        head_cabinet_width,
+        wind_speed,
+        exposure_type,
+        num_pipes,
+        pipe_yield_strength,
+        cab2_max_height,
+        cab2_height,
+        cab2_width,
+        cab3_max_height,
+        cab3_height,
+        cab3_width,
+        cab4_max_height,
+        cab4_height,
+        cab4_width,
+        pipe1_transition_height,
+        pipe2_transition_height,
+        pipe3_transition_height,
+        pipe4_transition_height,
+        foundation_type_raw,
+        rect_footer_length,
+        rect_footer_width,
+    ) = factors
 
+    # --- Interpret foundation type ---
+    if foundation_type_raw == 1:
         foundation_type = "pier footer"
-
-    elif factors[20] == 2:
-
+    elif foundation_type_raw == 2:
         foundation_type = "rectangular pier"
-
     else:
-
         foundation_type = "other"
 
     rect_footer_length = factors[21]
@@ -6873,7 +7216,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = .75
 
                 additional_pipe_length_required = (
-                                                              24 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          24 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 12 <= upper_pipe_diameter < 20:
 
@@ -6882,7 +7225,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1
 
                 additional_pipe_length_required = (
-                                                              36 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          36 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 20 <= upper_pipe_diameter < 26:
 
@@ -6891,7 +7234,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1
 
                 additional_pipe_length_required = (
-                                                              42 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          42 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 26 <= upper_pipe_diameter < 32:
 
@@ -6900,7 +7243,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1.25
 
                 additional_pipe_length_required = (
-                                                              54 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          54 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 32 <= upper_pipe_diameter < 48:
 
@@ -6909,7 +7252,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1.25
 
                 additional_pipe_length_required = (
-                                                              72 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          72 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 48 <= upper_pipe_diameter < 60:
 
@@ -6918,7 +7261,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1.25
 
                 additional_pipe_length_required = (
-                                                              90 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          90 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             elif 60 <= upper_pipe_diameter < 72:
 
@@ -6927,7 +7270,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1.25
 
                 additional_pipe_length_required = (
-                                                              108 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          108 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             else:
 
@@ -6936,7 +7279,7 @@ def save_pipe_foundation_factors(component_id):
                 required_ring_plate_thickness = 1.25
 
                 additional_pipe_length_required = (
-                                                              150 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
+                                                          150 + required_cap_plate_thickness + 2 * required_ring_plate_thickness) / 12
 
             required_cap_plate_diameter = lower_pipe_diameter + 1
 
@@ -6996,7 +7339,7 @@ def save_pipe_foundation_factors(component_id):
             force = qz * .85 * area * shape_coefficient * 2 / 3  # Calculate the force of the cabinet in lbsf. F = qz * .85 * area * shape_coefficient * 2 / 3
 
             moment = force * (
-                        max_height - cabinet_height / 2)  # Calculate the moment on the cabinet in ft-lbsf. M = F * d. d = max height - cabinet height / 2
+                    max_height - cabinet_height / 2)  # Calculate the moment on the cabinet in ft-lbsf. M = F * d. d = max height - cabinet height / 2
 
             return moment, force
 
@@ -8126,13 +8469,18 @@ def save_pipe_foundation_factors(component_id):
 
     ########################################################################################################################
 
-    results = pylon_sign_engineering_calculator(overall_height, head_cabinet_height, head_cabinet_width, wind_speed,
-                                                exposure_type, num_pipes, pipe_yield_strength, cab2_max_height,
-                                                cab2_height, cab2_width, cab3_max_height,
-                                                cab3_height, cab3_width, cab4_max_height, cab4_height, cab4_width,
-                                                pipe1_transition_height, pipe2_transition_height,
-                                                pipe3_transition_height, pipe4_transition_height, foundation_type,
-                                                rect_footer_length, rect_footer_width)
+    # AFTER all math is done ↓↓↓
+
+    results = pylon_sign_engineering_calculator(
+        overall_height, head_cabinet_height, head_cabinet_width, wind_speed,
+        exposure_type, num_pipes, pipe_yield_strength,
+        cab2_max_height, cab2_height, cab2_width,
+        cab3_max_height, cab3_height, cab3_width,
+        cab4_max_height, cab4_height, cab4_width,
+        pipe1_transition_height, pipe2_transition_height,
+        pipe3_transition_height, pipe4_transition_height,
+        foundation_type, rect_footer_length, rect_footer_width
+    )
 
     if foundation_type == "pier footer":
         options = [
@@ -8142,60 +8490,74 @@ def save_pipe_foundation_factors(component_id):
     else:
         options = []
 
-    (base_pipe_diameter, base_pipe_footage, stack_pipe1_diameter, stack_pipe1_footage, stack_pipe2_diameter,
-     stack_pipe2_footage, stack_pipe3_diameter, stack_pipe3_footage, stack_pipe4_diameter, stack_pipe4_footage,
-     rectangular_footer_depth) = results
+    (
+        base_pipe_diameter, base_pipe_footage,
+        stack_pipe1_diameter, stack_pipe1_footage,
+        stack_pipe2_diameter, stack_pipe2_footage,
+        stack_pipe3_diameter, stack_pipe3_footage,
+        stack_pipe4_diameter, stack_pipe4_footage,
+        rectangular_footer_depth
+    ) = results
 
     pier_quantity = num_pipes
 
-    # Save/update in DB
-    # Save/update in DB
-    conn = pyodbc.connect(CONN_STR)
+    # ---- PostgreSQL Connection ----
+    conn = get_db_connection()
     cursor = conn.cursor()
 
+    # ----------------------------------------------------------------------
+    #  CASE 1: PIER FOOTER
+    # ----------------------------------------------------------------------
     if foundation_type == "pier footer":
-        # Pier footer → zero rectangular footer
-        cursor.execute("""
-            UPDATE component_pipe_and_foundation
-            SET base_pipe_diameter=?, base_pipe_footage=?,
-                stack_pipe1_diameter=?, stack_pipe1_footage=?,
-                stack_pipe2_diameter=?, stack_pipe2_footage=?,
-                stack_pipe3_diameter=?, stack_pipe3_footage=?,
-                stack_pipe4_diameter=?, stack_pipe4_footage=?,
-                rectangular_footer_length=0, rectangular_footer_width=0, rectangular_footer_depth=0,
-                pier_quantity=?
-            WHERE component_ID=?
-        """, (
-            base_pipe_diameter, base_pipe_footage,
-            stack_pipe1_diameter, stack_pipe1_footage,
-            stack_pipe2_diameter, stack_pipe2_footage,
-            stack_pipe3_diameter, stack_pipe3_footage,
-            stack_pipe4_diameter, stack_pipe4_footage,
-            pier_quantity, component_id
-        ))
 
+        cursor.execute("""
+            UPDATE "component_pipe_and_foundation"
+            SET 
+                "base_pipe_diameter"=%s, "base_pipe_footage"=%s,
+                "stack_pipe1_diameter"=%s, "stack_pipe1_footage"=%s,
+                "stack_pipe2_diameter"=%s, "stack_pipe2_footage"=%s,
+                "stack_pipe3_diameter"=%s, "stack_pipe3_footage"=%s,
+                "stack_pipe4_diameter"=%s, "stack_pipe4_footage"=%s,
+                "rectangular_footer_length"=0,
+                "rectangular_footer_width"=0,
+                "rectangular_footer_depth"=0,
+                "pier_quantity"=%s
+            WHERE "component_ID"=%s
+        """,
+                       (
+                           base_pipe_diameter, base_pipe_footage,
+                           stack_pipe1_diameter, stack_pipe1_footage,
+                           stack_pipe2_diameter, stack_pipe2_footage,
+                           stack_pipe3_diameter, stack_pipe3_footage,
+                           stack_pipe4_diameter, stack_pipe4_footage,
+                           pier_quantity, component_id
+                       ))
+
+        # If UPDATE affects zero rows → INSERT
         if cursor.rowcount == 0:
             cursor.execute("""
-                INSERT INTO component_pipe_and_foundation (
-                    component_ID,
-                    base_pipe_diameter, base_pipe_footage,
-                    stack_pipe1_diameter, stack_pipe1_footage,
-                    stack_pipe2_diameter, stack_pipe2_footage,
-                    stack_pipe3_diameter, stack_pipe3_footage,
-                    stack_pipe4_diameter, stack_pipe4_footage,
-                    rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
-                    pier_quantity
+                INSERT INTO "component_pipe_and_foundation" (
+                    "component_ID",
+                    "base_pipe_diameter", "base_pipe_footage",
+                    "stack_pipe1_diameter", "stack_pipe1_footage",
+                    "stack_pipe2_diameter", "stack_pipe2_footage",
+                    "stack_pipe3_diameter", "stack_pipe3_footage",
+                    "stack_pipe4_diameter", "stack_pipe4_footage",
+                    "rectangular_footer_length", "rectangular_footer_width", "rectangular_footer_depth",
+                    "pier_quantity"
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
-            """, (
-                component_id,
-                base_pipe_diameter, base_pipe_footage,
-                stack_pipe1_diameter, stack_pipe1_footage,
-                stack_pipe2_diameter, stack_pipe2_footage,
-                stack_pipe3_diameter, stack_pipe3_footage,
-                stack_pipe4_diameter, stack_pipe4_footage,
-                pier_quantity
-            ))
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+                           (
+                               component_id,
+                               base_pipe_diameter, base_pipe_footage,
+                               stack_pipe1_diameter, stack_pipe1_footage,
+                               stack_pipe2_diameter, stack_pipe2_footage,
+                               stack_pipe3_diameter, stack_pipe3_footage,
+                               stack_pipe4_diameter, stack_pipe4_footage,
+                               0, 0, 0,  # footer: len, width, depth
+                               pier_quantity
+                           ))
 
         conn.commit()
         conn.close()
@@ -8206,65 +8568,72 @@ def save_pipe_foundation_factors(component_id):
             options=options
         )
 
-    else:
-        # Non-pier → zero pier fields; store rectangular length/width/depth
-        pier_diameter = 0
-        pier_depth = 0
-        pier_quantity = 0
+    # ----------------------------------------------------------------------
+    #  CASE 2: RECTANGULAR FOOTER (or other)
+    # ----------------------------------------------------------------------
 
-        # ✅ Add underground pipe length to base footage
-        base_pipe_footage += rectangular_footer_depth * num_pipes
+    # underground pipe contribution
+    pier_diameter = 0
+    pier_depth = 0
+    pier_quantity = 0
 
+    base_pipe_footage = base_pipe_footage + rectangular_footer_depth * num_pipes
+
+    cursor.execute("""
+        UPDATE "component_pipe_and_foundation"
+        SET 
+            "base_pipe_diameter"=%s, "base_pipe_footage"=%s,
+            "stack_pipe1_diameter"=%s, "stack_pipe1_footage"=%s,
+            "stack_pipe2_diameter"=%s, "stack_pipe2_footage"=%s,
+            "stack_pipe3_diameter"=%s, "stack_pipe3_footage"=%s,
+            "stack_pipe4_diameter"=%s, "stack_pipe4_footage"=%s,
+            "rectangular_footer_length"=%s, 
+            "rectangular_footer_width"=%s, 
+            "rectangular_footer_depth"=%s,
+            "pier_diameter"=%s, "pier_depth"=%s, "pier_quantity"=%s
+        WHERE "component_ID"=%s
+    """,
+                   (
+                       base_pipe_diameter, base_pipe_footage,
+                       stack_pipe1_diameter, stack_pipe1_footage,
+                       stack_pipe2_diameter, stack_pipe2_footage,
+                       stack_pipe3_diameter, stack_pipe3_footage,
+                       stack_pipe4_diameter, stack_pipe4_footage,
+                       rect_footer_length, rect_footer_width, rectangular_footer_depth,
+                       pier_diameter, pier_depth, pier_quantity,
+                       component_id
+                   ))
+
+    # If UPDATE hits 0 rows → INSERT
+    if cursor.rowcount == 0:
         cursor.execute("""
-            UPDATE component_pipe_and_foundation
-            SET base_pipe_diameter=?, base_pipe_footage=?,
-                stack_pipe1_diameter=?, stack_pipe1_footage=?,
-                stack_pipe2_diameter=?, stack_pipe2_footage=?,
-                stack_pipe3_diameter=?, stack_pipe3_footage=?,
-                stack_pipe4_diameter=?, stack_pipe4_footage=?,
-                rectangular_footer_length=?, rectangular_footer_width=?, rectangular_footer_depth=?,
-                pier_diameter=?, pier_depth=?, pier_quantity=?
-            WHERE component_ID=?
-        """, (
-            base_pipe_diameter, base_pipe_footage,
-            stack_pipe1_diameter, stack_pipe1_footage,
-            stack_pipe2_diameter, stack_pipe2_footage,
-            stack_pipe3_diameter, stack_pipe3_footage,
-            stack_pipe4_diameter, stack_pipe4_footage,
-            rect_footer_length, rect_footer_width, rectangular_footer_depth,
-            pier_diameter, pier_depth, pier_quantity,
-            component_id
-        ))
+            INSERT INTO "component_pipe_and_foundation" (
+                "component_ID",
+                "base_pipe_diameter", "base_pipe_footage",
+                "stack_pipe1_diameter", "stack_pipe1_footage",
+                "stack_pipe2_diameter", "stack_pipe2_footage",
+                "stack_pipe3_diameter", "stack_pipe3_footage",
+                "stack_pipe4_diameter", "stack_pipe4_footage",
+                "rectangular_footer_length", "rectangular_footer_width", "rectangular_footer_depth",
+                "pier_diameter", "pier_depth", "pier_quantity"
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+                       (
+                           component_id,
+                           base_pipe_diameter, base_pipe_footage,
+                           stack_pipe1_diameter, stack_pipe1_footage,
+                           stack_pipe2_diameter, stack_pipe2_footage,
+                           stack_pipe3_diameter, stack_pipe3_footage,
+                           stack_pipe4_diameter, stack_pipe4_footage,
+                           rect_footer_length, rect_footer_width, rectangular_footer_depth,
+                           pier_diameter, pier_depth, pier_quantity
+                       ))
 
-        if cursor.rowcount == 0:
-            cursor.execute("""
-                INSERT INTO component_pipe_and_foundation (
-                    component_ID,
-                    base_pipe_diameter, base_pipe_footage,
-                    stack_pipe1_diameter, stack_pipe1_footage,
-                    stack_pipe2_diameter, stack_pipe2_footage,
-                    stack_pipe3_diameter, stack_pipe3_footage,
-                    stack_pipe4_diameter, stack_pipe4_footage,
-                    rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
-                    pier_diameter, pier_depth, pier_quantity
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                component_id,
-                base_pipe_diameter, base_pipe_footage,
-                stack_pipe1_diameter, stack_pipe1_footage,
-                stack_pipe2_diameter, stack_pipe2_footage,
-                stack_pipe3_diameter, stack_pipe3_footage,
-                stack_pipe4_diameter, stack_pipe4_footage,
-                rect_footer_length, rect_footer_width, rectangular_footer_depth,
-                pier_diameter, pier_depth, pier_quantity
-            ))
+    conn.commit()
+    conn.close()
 
-        conn.commit()
-        conn.close()
-
-        # ✅ Go straight to costs (no options for non-pier)
-        return redirect(url_for("pipe_foundation_costs", component_id=component_id))
+    return redirect(url_for("pipe_foundation_costs", component_id=component_id))
 
 ########################################################################################################################
 
@@ -8276,6 +8645,7 @@ def save_pipe_foundation_choice(component_id):
     if not choice:
         return "No option selected", 400
 
+    # Expected "depth|diameter"
     try:
         depth_str, diameter_str = choice.split("|")
         pier_depth = float(depth_str)
@@ -8283,42 +8653,55 @@ def save_pipe_foundation_choice(component_id):
     except Exception:
         return f"Invalid choice format: {choice}", 400
 
-    conn = pyodbc.connect(CONN_STR)
+    # ------------------------------
+    # PostgreSQL connection
+    # ------------------------------
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Get current base_pipe_footage and pier_quantity (default to 0 if not found)
+    # Get previous values (Postgres returns tuples, not .field access)
     cursor.execute("""
-        SELECT base_pipe_footage, pier_quantity
-        FROM component_pipe_and_foundation
-        WHERE component_ID=?
+        SELECT "base_pipe_footage", "pier_quantity"
+        FROM "component_pipe_and_foundation"
+        WHERE "component_ID"=%s
     """, (component_id,))
     row = cursor.fetchone()
+
     if row:
-        base_pipe_footage = float(row.base_pipe_footage or 0)
-        pier_quantity = int(row.pier_quantity or 0)
+        base_pipe_footage = float(row[0] or 0)
+        pier_quantity = int(row[1] or 0)
     else:
         base_pipe_footage = 0
         pier_quantity = 0
 
-    # Add underground portion
+    # Add underground pipe footage
     new_base_pipe_footage = base_pipe_footage + (pier_depth * pier_quantity)
 
-    # Upsert logic
+    # ------------------------------
+    # UPDATE (attempt upsert)
+    # ------------------------------
     cursor.execute("""
-        UPDATE component_pipe_and_foundation
-        SET pier_depth=?, pier_diameter=?, base_pipe_footage=?
-        WHERE component_ID=?
+        UPDATE "component_pipe_and_foundation"
+        SET 
+            "pier_depth"=%s, 
+            "pier_diameter"=%s,
+            "base_pipe_footage"=%s
+        WHERE "component_ID"=%s
     """, (pier_depth, pier_diameter, new_base_pipe_footage, component_id))
 
+    # If no rows updated → INSERT
     if cursor.rowcount == 0:
         cursor.execute("""
-            INSERT INTO component_pipe_and_foundation (
-                component_ID, pier_depth, pier_diameter,
-                base_pipe_footage, digging_cost, concrete_cost,
-                additional_footer_cost, pipe_cost
+            INSERT INTO "component_pipe_and_foundation" (
+                "component_ID",
+                "pier_depth", "pier_diameter",
+                "base_pipe_footage",
+                "digging_cost", "concrete_cost",
+                "additional_footer_cost", "pipe_cost"
             )
-            VALUES (?, ?, ?, ?, 0, 0, 0, 0)
-        """, (component_id, pier_depth, pier_diameter, new_base_pipe_footage))
+            VALUES (%s, %s, %s, %s, 0, 0, 0, 0)
+        """,
+        (component_id, pier_depth, pier_diameter, new_base_pipe_footage))
 
     conn.commit()
     conn.close()
@@ -8331,34 +8714,63 @@ def save_pipe_foundation_choice(component_id):
 
 @app.route("/pipe_foundation_costs/<int:component_id>", methods=["GET", "POST"])
 def pipe_foundation_costs(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT line_ID FROM Components WHERE component_ID = ?", (component_id,))
+    # -----------------------------
+    # Get line_ID for component
+    # -----------------------------
+    cursor.execute("""
+        SELECT "line_ID"
+        FROM "Components"
+        WHERE "component_ID"=%s
+    """, (component_id,))
     row_line = cursor.fetchone()
     line_id = row_line[0] if row_line else None
 
     opportunity_id = None
     tax_type = None
 
+    # -----------------------------
+    # Find opportunity
+    # -----------------------------
     if line_id is not None:
-        cursor.execute("SELECT opportunity_ID FROM Line_Items WHERE line_ID = ?", (line_id,))
+        cursor.execute("""
+            SELECT "opportunity_ID"
+            FROM "Line_Items"
+            WHERE "line_ID"=%s
+        """, (line_id,))
         row_opp = cursor.fetchone()
         opportunity_id = row_opp[0] if row_opp else None
 
+    # -----------------------------
+    # Get tax type
+    # -----------------------------
     if opportunity_id is not None:
-        cursor.execute("SELECT tax_type FROM Opportunities WHERE opportunity_ID = ?", (opportunity_id,))
+        cursor.execute("""
+            SELECT "tax_type"
+            FROM "Opportunities"
+            WHERE "opportunity_ID"=%s
+        """, (opportunity_id,))
         row_tax = cursor.fetchone()
         tax_type = row_tax[0] if row_tax else None
 
+    # -----------------------------
+    # Load pipe + foundation data
+    # -----------------------------
     cursor.execute("""
-        SELECT pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, 
-               stack_pipe1_diameter, stack_pipe1_footage, stack_pipe2_diameter, stack_pipe2_footage, 
-               stack_pipe3_diameter, stack_pipe3_footage, stack_pipe4_diameter, stack_pipe4_footage, 
-               pier_quantity, rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth, 
-               digging_cost, concrete_cost, additional_footer_cost, pipe_cost
-        FROM component_pipe_and_foundation
-        WHERE component_ID = ?
+        SELECT 
+            "pier_depth", "pier_diameter",
+            "base_pipe_diameter", "base_pipe_footage",
+            "stack_pipe1_diameter", "stack_pipe1_footage",
+            "stack_pipe2_diameter", "stack_pipe2_footage",
+            "stack_pipe3_diameter", "stack_pipe3_footage",
+            "stack_pipe4_diameter", "stack_pipe4_footage",
+            "pier_quantity",
+            "rectangular_footer_length", "rectangular_footer_width", "rectangular_footer_depth",
+            "digging_cost", "concrete_cost", "additional_footer_cost", "pipe_cost"
+        FROM "component_pipe_and_foundation"
+        WHERE "component_ID"=%s
     """, (component_id,))
     row = cursor.fetchone()
     conn.close()
@@ -8366,43 +8778,58 @@ def pipe_foundation_costs(component_id):
     if not row:
         return "Pipe/Foundation data not found", 404
 
-    (pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage, stack_pipe1_diameter,
-     stack_pipe1_footage, stack_pipe2_diameter, stack_pipe2_footage, stack_pipe3_diameter,
-     stack_pipe3_footage, stack_pipe4_diameter, stack_pipe4_footage, pier_quantity,
-     rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
-     digging_cost, concrete_cost, additional_footer_cost, pipe_cost) = row
+    (
+        pier_depth, pier_diameter, base_pipe_diameter, base_pipe_footage,
+        stack_pipe1_diameter, stack_pipe1_footage,
+        stack_pipe2_diameter, stack_pipe2_footage,
+        stack_pipe3_diameter, stack_pipe3_footage,
+        stack_pipe4_diameter, stack_pipe4_footage,
+        pier_quantity,
+        rectangular_footer_length, rectangular_footer_width, rectangular_footer_depth,
+        digging_cost, concrete_cost, additional_footer_cost, pipe_cost
+    ) = row
 
+    # =================================================================
+    # POST — Save Costs
+    # =================================================================
     if request.method == "POST":
-
         digging_cost = float(request.form.get("digging_cost", 0))
         concrete_cost = float(request.form.get("concrete_cost", 0))
         additional_footer_cost = float(request.form.get("additional_footer_cost", 0))
         pipe_cost = float(request.form.get("pipe_cost", 0))
 
+        # Compute total
         material_unit_cost = concrete_cost + pipe_cost
         labor_unit_cost = digging_cost + additional_footer_cost
         unit_cost = material_unit_cost + labor_unit_cost
 
+        # Pricing rules
         if tax_type != "New Construction":
             unit_price = unit_cost * 1.35
-
         else:
-            unit_price = material_unit_cost * 1.35 * 1.093325 + labor_unit_cost * 1.35
+            unit_price = (
+                material_unit_cost * 1.35 * 1.093325 +
+                labor_unit_cost * 1.35
+            )
 
-
-        conn = pyodbc.connect(CONN_STR)
+        # Update DB
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
-            UPDATE component_pipe_and_foundation
-            SET digging_cost=?, concrete_cost=?, additional_footer_cost=?, pipe_cost=?
-            WHERE component_ID=?
+            UPDATE "component_pipe_and_foundation"
+            SET 
+                "digging_cost"=%s,
+                "concrete_cost"=%s,
+                "additional_footer_cost"=%s,
+                "pipe_cost"=%s
+            WHERE "component_ID"=%s
         """, (digging_cost, concrete_cost, additional_footer_cost, pipe_cost, component_id))
 
         cursor.execute("""
-            UPDATE Components
-            SET unit_cost=?, unit_price=?
-            WHERE component_ID=?
+            UPDATE "Components"
+            SET "unit_cost"=%s, "unit_price"=%s
+            WHERE "component_ID"=%s
         """, (unit_cost, unit_price, component_id))
 
         conn.commit()
@@ -8410,18 +8837,21 @@ def pipe_foundation_costs(component_id):
 
         return redirect(url_for("quote_component", component_id=component_id, component_type_id=3))
 
-    conn = pyodbc.connect(CONN_STR)
+    # =================================================================
+    # GET — Show Costs Page
+    # =================================================================
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT unit_cost, unit_price
-        FROM Components
-        WHERE component_ID=?
+        SELECT "unit_cost", "unit_price"
+        FROM "Components"
+        WHERE "component_ID"=%s
     """, (component_id,))
     cost_row = cursor.fetchone()
     conn.close()
 
-    unit_cost = cost_row.unit_cost if cost_row else 0
-    unit_price = cost_row.unit_price if cost_row else 0
+    unit_cost = cost_row[0] if cost_row else 0
+    unit_price = cost_row[1] if cost_row else 0
 
     context = dict(
         component_id=component_id,
@@ -8462,15 +8892,19 @@ def add_masonry(component_id):
     unit_cost = float(request.form["unit_cost"])
     qty = float(request.form["quantity"])
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO component_Masonry (component_ID, masonry_description, unit_cost, quantity)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO "component_Masonry" 
+            ("component_ID", "masonry_description", "unit_cost", "quantity")
+        VALUES (%s, %s, %s, %s)
     """, (component_id, description, unit_cost, qty))
+
     conn.commit()
     conn.close()
 
+    # Recalculate totals in the Components table
     update_masonry_component_totals(component_id)
 
     return redirect(url_for("quote_component", component_id=component_id, component_type_id=8))
@@ -8485,33 +8919,40 @@ def add_rental_equipment(component_id):
     unit_cost = float(request.form.get("unit_cost", 0))
     qty = float(request.form.get("quantity", 0))
 
-    # Hidden IDs (may or may not exist depending on where it was quoted)
-    customer_id = int(request.form.get("customer_id", 0))
-    opportunity_id = int(request.form.get("opportunity_id", 0))
+    # Hidden IDs (optional)
+    customer_id = request.form.get("customer_id", type=int)
+    opportunity_id = request.form.get("opportunity_id", type=int)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO component_Rental_Equipment (component_ID, equipment_description, unit_cost, quantity)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO "component_Rental_Equipment" 
+            ("component_ID", "equipment_description", "unit_cost", "quantity")
+        VALUES (%s, %s, %s, %s)
     """, (component_id, description, unit_cost, qty))
+
     conn.commit()
     conn.close()
 
-    # ✅ Update component totals
+    # Recalculate component totals
     update_rental_equipment_component_totals(component_id)
 
-    # ✅ Redirect depending on context
+    # Redirect based on context
     if customer_id:
-        return redirect(url_for("quote_component",
-                                component_id=component_id,
-                                component_type_id=9,
-                                customer_id=customer_id))
-    else:
-        return redirect(url_for("quote_component",
-                                component_id=component_id,
-                                component_type_id=9,
-                                opportunity_id=opportunity_id))
+        return redirect(url_for(
+            "quote_component",
+            component_id=component_id,
+            component_type_id=9,
+            customer_id=customer_id
+        ))
+
+    return redirect(url_for(
+        "quote_component",
+        component_id=component_id,
+        component_type_id=9,
+        opportunity_id=opportunity_id
+    ))
 
 ########################################################################################################################
 
@@ -8519,10 +8960,10 @@ def add_rental_equipment(component_id):
 
 @app.route("/update_component_quantities/<int:component_id>", methods=["POST"])
 def update_component_quantities(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Grab lists in order
+    # Lists from form
     material_ids = request.form.getlist("material_row_id[]")
     material_qtys = request.form.getlist("material_qty[]")
     labor_ids = request.form.getlist("labor_row_id[]")
@@ -8531,53 +8972,57 @@ def update_component_quantities(component_id):
     updated_rows = 0
     deleted_rows = 0
 
-    # ---------- MATERIALS ----------
+    # -----------------------
+    #      MATERIALS
+    # -----------------------
     for rid, q in zip(material_ids, material_qtys):
         if not rid.strip():
             continue
+
         try:
             new_qty = float(q or 0)
         except ValueError:
             new_qty = 0.0
 
         if new_qty <= 0:
-            print(f"Deleting material row ID {rid}")
+            # Delete row
             cursor.execute("""
-                DELETE FROM [component_MFG_Materials]
-                WHERE [ID] = ?
+                DELETE FROM "component_MFG_Materials"
+                WHERE "ID" = %s
             """, (rid,))
             deleted_rows += cursor.rowcount
         else:
-            print(f"Updating material row ID {rid} → {new_qty}")
+            # Update row
             cursor.execute("""
-                UPDATE [component_MFG_Materials]
-                SET [quantity] = ?
-                WHERE [ID] = ?
+                UPDATE "component_MFG_Materials"
+                SET "quantity" = %s
+                WHERE "ID" = %s
             """, (new_qty, rid))
             updated_rows += cursor.rowcount
 
-    # ---------- LABOR ----------
+    # -----------------------
+    #        LABOR
+    # -----------------------
     for rid, q in zip(labor_ids, labor_qtys):
         if not rid.strip():
             continue
+
         try:
             new_qty = float(q or 0)
         except ValueError:
             new_qty = 0.0
 
         if new_qty <= 0:
-            print(f"Deleting labor row ID {rid}")
             cursor.execute("""
-                DELETE FROM [component_MFG_Labor]
-                WHERE [line_item_labor_ID] = ?
+                DELETE FROM "component_MFG_Labor"
+                WHERE "line_item_labor_ID" = %s
             """, (rid,))
             deleted_rows += cursor.rowcount
         else:
-            print(f"Updating labor row ID {rid} → {new_qty}")
             cursor.execute("""
-                UPDATE [component_MFG_Labor]
-                SET [quantity] = ?
-                WHERE [line_item_labor_ID] = ?
+                UPDATE "component_MFG_Labor"
+                SET "quantity" = %s
+                WHERE "line_item_labor_ID" = %s
             """, (new_qty, rid))
             updated_rows += cursor.rowcount
 
@@ -8587,7 +9032,7 @@ def update_component_quantities(component_id):
     # Recalculate totals for the component
     update_component_totals(component_id)
 
-    # --- Retrieve query params to decide where to go back ---
+    # Redirect context
     customer_id = request.args.get("customer_id", type=int)
     component_type_id = request.args.get("component_type_id", default=1, type=int)
     hide_back_button = request.args.get("hide_back_button", "false").lower() == "true"
@@ -8602,9 +9047,8 @@ def update_component_quantities(component_id):
 
     flash(" | ".join(msg), "success" if (updated_rows or deleted_rows) else "warning")
 
-    # --- Redirect appropriately ---
+    # Redirect appropriately
     if customer_id:
-        # Coming from customer details view
         return redirect(url_for(
             "quote_component",
             component_id=component_id,
@@ -8612,19 +9056,26 @@ def update_component_quantities(component_id):
             customer_id=customer_id,
             hide_back_button=True
         ))
-    else:
-        # Default: came from opportunity flow
-        return redirect(url_for(
-            "quote_component",
-            component_id=component_id,
-            component_type_id=component_type_id
-        ))
+
+    return redirect(url_for(
+        "quote_component",
+        component_id=component_id,
+        component_type_id=component_type_id
+    ))
 
 ########################################################################################################################
 
+"""ROUTE TO UPDATE INSTALL QUANTITIES"""
+
 @app.route("/update_install_quantities/<int:component_id>", methods=["POST"])
 def update_install_quantities(component_id):
-    conn = pyodbc.connect(CONN_STR)
+    print("RAW FORM:", request.form)
+    print("MAT IDS:", request.form.getlist("install_material_row_id[]"))
+    print("MAT QTY:", request.form.getlist("install_material_qty[]"))
+    print("LAB IDS:", request.form.getlist("install_labor_row_id[]"))
+    print("LAB QTY:", request.form.getlist("install_labor_qty[]"))
+
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Extract lists from POST form
@@ -8637,7 +9088,7 @@ def update_install_quantities(component_id):
     deleted_rows = 0
 
     # ==============================================================
-    # 🔧 Installation Materials
+    # 🔧 INSTALLATION MATERIALS
     # ==============================================================
     for rid, q in zip(mat_ids, mat_qtys):
         rid = rid.strip()
@@ -8650,25 +9101,25 @@ def update_install_quantities(component_id):
             new_qty = 0.0
 
         if new_qty <= 0:
-            # Delete zero-qty materials
+            # DELETE MATERIAL
             cursor.execute("""
-                DELETE FROM [Component_Install_Materials]
-                WHERE [component_install_materials_ID] = ?
-                  AND [component_ID] = ?
+                DELETE FROM "component_install_Materials"
+                WHERE "component_install_materials_ID" = %s
+                  AND "component_ID" = %s
             """, (rid, component_id))
             deleted_rows += cursor.rowcount
         else:
-            # Update existing material
+            # UPDATE MATERIAL
             cursor.execute("""
-                UPDATE [Component_Install_Materials]
-                SET [quantity] = ?
-                WHERE [component_install_materials_ID] = ?
-                  AND [component_ID] = ?
+                UPDATE "component_install_Materials"
+                SET "quantity" = %s
+                WHERE "component_install_materials_ID" = %s
+                  AND "component_ID" = %s
             """, (new_qty, rid, component_id))
             updated_rows += cursor.rowcount
 
     # ==============================================================
-    # 🧰 Installation Labor
+    # 🧰 INSTALLATION LABOR
     # ==============================================================
     for rid, q in zip(lab_ids, lab_qtys):
         rid = rid.strip()
@@ -8681,20 +9132,20 @@ def update_install_quantities(component_id):
             new_qty = 0.0
 
         if new_qty <= 0:
-            # Delete zero-qty labor rows
+            # DELETE LABOR
             cursor.execute("""
-                DELETE FROM [Component_Install_Labor]
-                WHERE [component_install_labor_ID] = ?
-                  AND [component_ID] = ?
+                DELETE FROM "component_install_Labor"
+                WHERE "component_install_labor_ID" = %s
+                  AND "component_ID" = %s
             """, (rid, component_id))
             deleted_rows += cursor.rowcount
         else:
-            # Update existing labor rows
+            # UPDATE LABOR
             cursor.execute("""
-                UPDATE [Component_Install_Labor]
-                SET [quantity] = ?
-                WHERE [component_install_labor_ID] = ?
-                  AND [component_ID] = ?
+                UPDATE "component_install_Labor"
+                SET "quantity" = %s
+                WHERE "component_install_labor_ID" = %s
+                  AND "component_ID" = %s
             """, (new_qty, rid, component_id))
             updated_rows += cursor.rowcount
 
@@ -8703,12 +9154,12 @@ def update_install_quantities(component_id):
     conn.close()
 
     # ==============================================================
-    # 🧮 Recalculate Totals for Component
+    # 🧮 RECALCULATE INSTALL TOTALS
     # ==============================================================
     update_install_component_totals(component_id)
 
     # ==============================================================
-    # 💬 User Feedback
+    # 💬 USER FEEDBACK
     # ==============================================================
     msg = []
     if updated_rows:
@@ -8721,13 +9172,11 @@ def update_install_quantities(component_id):
     flash(" | ".join(msg), "success" if (updated_rows or deleted_rows) else "warning")
 
     # ==============================================================
-    # 🔁 Preserve navigation context (customer or opportunity)
+    # 🔁 PRESERVE CONTEXT (customer or opportunity)
     # ==============================================================
-    # Read hidden form fields to know where we came from
     customer_id = request.form.get("customer_id", type=int)
     opportunity_id = request.form.get("opportunity_id", type=int)
 
-    # Build redirect with appropriate context
     if customer_id:
         return redirect(url_for(
             "quote_component",
@@ -8735,20 +9184,21 @@ def update_install_quantities(component_id):
             component_type_id=2,
             customer_id=customer_id
         ))
-    elif opportunity_id:
+
+    if opportunity_id:
         return redirect(url_for(
             "quote_component",
             component_id=component_id,
             component_type_id=2,
             opportunity_id=opportunity_id
         ))
-    else:
-        # Fallback (no parent context)
-        return redirect(url_for(
-            "quote_component",
-            component_id=component_id,
-            component_type_id=2
-        ))
+
+    # Fallback
+    return redirect(url_for(
+        "quote_component",
+        component_id=component_id,
+        component_type_id=2
+    ))
 
 ########################################################################################################################
 
@@ -8759,29 +9209,38 @@ def add_customer_line_item(customer_id):
     description = request.form.get("description")
     quantity = float(request.form.get("quantity") or 1)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # get next available shared line_ID
-    cursor.execute("SELECT MAX(line_ID) FROM Line_Items")
-    max_line_items = cursor.fetchone()[0] or 0
+    # ----------------------------------------------------
+    # 1️⃣ Get next unified line_ID (max of both tables)
+    # ----------------------------------------------------
+    cursor.execute("""SELECT COALESCE(MAX("line_ID"), 0) FROM "Line_Items" """)
+    max_line_items = cursor.fetchone()[0]
 
-    cursor.execute("SELECT MAX(line_ID) FROM Customer_Line_Items")
-    max_customer_items = cursor.fetchone()[0] or 0
+    cursor.execute("""SELECT COALESCE(MAX("line_ID"), 0) FROM "Customer_Line_Items" """)
+    max_customer_items = cursor.fetchone()[0]
 
-    next_line_id = max(int(max_line_items), int(max_customer_items)) + 1
+    next_line_id = max(max_line_items, max_customer_items) + 1
 
-    # get next sequence within this customer’s saved templates
-    cursor.execute("SELECT MAX(line_item_sequence) FROM Customer_Line_Items WHERE customer_ID=?", (customer_id,))
-    max_seq = cursor.fetchone()[0] or 0
-    next_seq = max_seq + 1
-
-    # insert with new unified line_ID
+    # ----------------------------------------------------
+    # 2️⃣ Get next sequence number for this customer
+    # ----------------------------------------------------
     cursor.execute("""
-        INSERT INTO Customer_Line_Items (
-            line_ID, customer_ID, line_item_description, quantity, unit_cost, unit_price, line_item_sequence
-        )
-        VALUES (?, ?, ?, ?, 0, 0, ?)
+        SELECT COALESCE(MAX("line_item_sequence"), 0)
+        FROM "Customer_Line_Items"
+        WHERE "customer_ID" = %s
+    """, (customer_id,))
+    next_seq = cursor.fetchone()[0] + 1
+
+    # ----------------------------------------------------
+    # 3️⃣ Insert the new customer template line item
+    # ----------------------------------------------------
+    cursor.execute("""
+        INSERT INTO "Customer_Line_Items"
+        ("line_ID", "customer_ID", "line_item_description",
+         "quantity", "unit_cost", "unit_price", "line_item_sequence")
+        VALUES (%s, %s, %s, %s, 0, 0, %s)
     """, (next_line_id, customer_id, description, quantity, next_seq))
 
     conn.commit()
@@ -8798,27 +9257,34 @@ def update_customer_line_item_and_components(customer_id, line_id):
     component_type_id = request.form.get("component_type_id")
     description = request.form.get("description")
     quantity = float(request.form.get("quantity") or 1)
-    sequence_number = request.form.get("sequence_number")
+    sequence_number = int(request.form.get("sequence_number") or 0)
 
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Update base line item
+    # ---------------------------------------------------------
+    # 1️⃣ Update Customer Line Item
+    # ---------------------------------------------------------
     cursor.execute("""
-        UPDATE Customer_Line_Items
-        SET line_item_description=?, quantity=?, line_item_sequence=?
-        WHERE line_ID=?
+        UPDATE "Customer_Line_Items"
+        SET "line_item_description" = %s,
+            "quantity" = %s,
+            "line_item_sequence" = %s
+        WHERE "line_ID" = %s
     """, (description, quantity, sequence_number, line_id))
 
-    # Add new component if selected (MATCHES your working opportunity INSERT)
+    # ---------------------------------------------------------
+    # 2️⃣ Add a new Component (if user selected a type)
+    # ---------------------------------------------------------
     if component_type_id:
         component_type_id = int(component_type_id)
         cursor.execute("""
-            INSERT INTO Components
-            (line_ID, component_type_ID, quantity, unit_cost, unit_price,
-             factor1, factor2, factor3, factor4, factor5)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (line_id, component_type_id, 1, 0, 0, 0, 0, 0, 0, 0))
+            INSERT INTO "Components"
+            ("line_ID", "component_type_ID", "quantity",
+             "unit_cost", "unit_price",
+             "factor1", "factor2", "factor3", "factor4", "factor5")
+            VALUES (%s, %s, 1, 0, 0, 0, 0, 0, 0, 0)
+        """, (line_id, component_type_id))
 
     conn.commit()
     conn.close()
@@ -8831,38 +9297,46 @@ def update_customer_line_item_and_components(customer_id, line_id):
 
 @app.route("/get_install_vendors/<int:opportunity_id>")
 def get_install_vendors(opportunity_id):
-    import pyodbc
     from flask import jsonify
 
-    # --- Connect to Access ---
-    conn = pyodbc.connect(
-        r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};"
-        r"DBQ=C:\\Users\\Brooks\\OneDrive\\Desktop\\Sign_App1 - Step 3.accdb;"
-    )
+    # Connect to PostgreSQL
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # --- Get opportunity site info ---
-    cursor.execute("SELECT site_state FROM Opportunities WHERE opportunity_id = ?", (opportunity_id,))
+    # ----------------------------------------------------------
+    # 1️⃣ Get the opportunity site state
+    # ----------------------------------------------------------
+    cursor.execute("""
+        SELECT "site_state"
+        FROM "Opportunities"
+        WHERE "opportunity_ID" = %s
+    """, (opportunity_id,))
+
     row = cursor.fetchone()
     site_state = row[0].strip().upper() if row and row[0] else None
 
-    # --- Define Canadian provinces ---
-    canadian_provinces = {"AB", "BC", "NS", "ON", "QC"}
+    # ----------------------------------------------------------
+    # 2️⃣ List of Canadian provinces (2-letter)
+    # ----------------------------------------------------------
+    canadian_provinces = {"AB", "BC", "MB", "NB", "NL", "NS", "NT",
+                          "NU", "ON", "PE", "QC", "SK", "YT"}
 
-    # --- Select vendors by matching state/province ---
+    # If the site is in Canada, we allow province match.
+    # If US, match US state.
     cursor.execute("""
-        SELECT vendor_name, email, city, state, zip, preferred
-        FROM install_vendors
-        WHERE state = ?
+        SELECT "vendor_name", "email", "city", "state", "zip", "preferred"
+        FROM "install_vendors"
+        WHERE UPPER("state") = %s
     """, (site_state,))
 
     rows = cursor.fetchall()
     conn.close()
 
-    # --- Format JSON output ---
+    # ----------------------------------------------------------
+    # 3️⃣ Convert result rows into JSON-friendly dicts
+    # ----------------------------------------------------------
     vendors = []
-    for r in rows:
-        vendor_name, email, city, state, zip_code, preferred = r
+    for vendor_name, email, city, state, zip_code, preferred in rows:
         vendors.append({
             "vendor_name": vendor_name,
             "email": email,
@@ -8872,8 +9346,10 @@ def get_install_vendors(opportunity_id):
             "preferred": bool(preferred) if preferred is not None else False
         })
 
-    # --- Sort preferred first ---
-    vendors.sort(key=lambda x: x["preferred"], reverse=True)
+    # ----------------------------------------------------------
+    # 4️⃣ Preferred vendors first
+    # ----------------------------------------------------------
+    vendors.sort(key=lambda v: v["preferred"], reverse=True)
 
     return jsonify(vendors)
 
@@ -8884,201 +9360,174 @@ def get_install_vendors(opportunity_id):
 @app.route("/add_customer_quote_to_opportunity/<int:opportunity_id>/<int:customer_line_id>", methods=["POST"])
 def add_customer_quote_to_opportunity(opportunity_id, customer_line_id):
     try:
-        conn = pyodbc.connect(CONN_STR)
+        conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1️⃣ Get source line item from Customer_Line_Items
+        # 1️⃣ Get the source line item from Customer_Line_Items
         cur.execute("""
-            SELECT customer_ID, line_item_description, quantity, unit_cost, unit_price
-            FROM Customer_Line_Items
-            WHERE line_ID=?
+            SELECT "customer_ID", line_item_description, quantity, unit_cost, unit_price
+            FROM "Customer_Line_Items"
+            WHERE "line_ID" = %s
         """, (customer_line_id,))
         src = cur.fetchone()
+
         if not src:
             conn.close()
             return jsonify({"success": False, "message": "Customer line not found."}), 404
 
         # 2️⃣ Determine next sequence number
         cur.execute("""
-            SELECT IIF(ISNULL(MAX(line_item_sequence)), 0, MAX(line_item_sequence))
-            FROM Line_Items
-            WHERE opportunity_ID=?
+            SELECT COALESCE(MAX(line_item_sequence), 0)
+            FROM "Line_Items"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
-        next_seq = (cur.fetchone()[0] or 0) + 10
+        next_seq = cur.fetchone()[0] + 10
 
-        # 3️⃣ Determine next available line_ID
+        # 3️⃣ Determine next available line_id
         cur.execute("""
-            SELECT MAX(IIF(ISNULL(x.max_id),0,x.max_id))
+            SELECT COALESCE(MAX("line_ID"), 0)
             FROM (
-                SELECT MAX(line_ID) AS max_id FROM Line_Items
+                SELECT "line_ID" FROM "Line_Items"
                 UNION ALL
-                SELECT MAX(line_ID) AS max_id FROM Customer_Line_Items
+                SELECT "line_ID" FROM "Customer_Line_Items"
             ) AS x
         """)
-        next_line_id = (cur.fetchone()[0] or 0) + 1
+        next_line_id = cur.fetchone()[0] + 1
 
         # 4️⃣ Insert new Line_Item
         cur.execute("""
-            INSERT INTO Line_Items (
-                line_ID, opportunity_ID, line_item_description,
-                quantity, unit_cost, unit_price, line_item_sequence, activation_status
+            INSERT INTO "Line_Items" (
+                "line_ID", "opportunity_ID", line_item_description,
+                quantity, unit_cost, unit_price,
+                line_item_sequence, activation_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
         """, (
             next_line_id,
             opportunity_id,
-            src.line_item_description,
-            src.quantity or 1,
-            src.unit_cost or 0,
-            src.unit_price or 0,
+            src[1],                # line_item_description
+            src[2] or 1,           # quantity
+            src[3] or 0,           # unit_cost
+            src[4] or 0,           # unit_price
             next_seq
         ))
         new_line_id = next_line_id
 
         # 5️⃣ Copy Components
         cur.execute("""
-            SELECT component_ID, component_type_ID, quantity, unit_cost, unit_price,
-                   factor1, factor2, factor3, factor4, factor5, factor6, factor7, factor8,
-                   factor9, factor10, factor11, factor12, factor13, factor14, factor15,
-                   factor16, factor17, factor18, factor19, factor20, factor21, factor22,
-                   factor23, factor24, factor25, factor26, factor27
-            FROM Components
-            WHERE line_ID=?
-        """, (customer_line_id,))
+            SELECT "line_ID"
+            FROM "Customer_Line_Items"
+            WHERE autonumber = %s OR "line_ID" = %s
+        """, (customer_line_id, customer_line_id))
+        row = cur.fetchone()
+
+        if not row:
+            raise Exception("Customer line ID does not match autonumber or line_ID.")
+
+        true_customer_line_id = row[0]
+
+        # Now fetch the components linked to that true line_ID
+        cur.execute("""
+            SELECT 
+                "component_ID",
+                "line_ID",
+                "component_type_ID",
+                quantity,
+                unit_cost,
+                unit_price,
+                factor1, factor2, factor3, factor4, factor5, factor6, factor7, factor8,
+                factor9, factor10, factor11, factor12, factor13, factor14, factor15,
+                factor16, factor17, factor18, factor19, factor20, factor21, factor22,
+                factor23, factor24, factor25, factor26, factor27
+            FROM "Components"
+            WHERE "line_ID" = %s
+        """, (true_customer_line_id,))
         src_components = cur.fetchall()
 
-        old_to_new_component = {}
+        old_to_new = {}
 
         for c in src_components:
             cur.execute("""
-                INSERT INTO Components (
-                    line_ID, component_type_ID, quantity, unit_cost, unit_price,
+                INSERT INTO "Components" (
+                    "line_ID", "component_type_ID", quantity, unit_cost, unit_price,
                     factor1, factor2, factor3, factor4, factor5, factor6, factor7, factor8,
                     factor9, factor10, factor11, factor12, factor13, factor14, factor15,
                     factor16, factor17, factor18, factor19, factor20, factor21, factor22,
                     factor23, factor24, factor25, factor26, factor27
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
                 )
+                RETURNING "component_ID"
             """, (
-                new_line_id, c.component_type_ID, c.quantity or 0, c.unit_cost or 0, c.unit_price or 0,
-                c.factor1, c.factor2, c.factor3, c.factor4, c.factor5, c.factor6, c.factor7, c.factor8,
-                c.factor9, c.factor10, c.factor11, c.factor12, c.factor13, c.factor14, c.factor15,
-                c.factor16, c.factor17, c.factor18, c.factor19, c.factor20, c.factor21, c.factor22,
-                c.factor23, c.factor24, c.factor25, c.factor26, c.factor27
+                new_line_id, c[2], c[3] or 0, c[4] or 0, c[5] or 0,
+                c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13],
+                c[14], c[15], c[16], c[17], c[18], c[19], c[20],
+                c[21], c[22], c[23], c[24], c[25], c[26], c[27],
+                c[28], c[29], c[30], c[31], c[32]
             ))
-            cur.execute("SELECT @@IDENTITY")
-            new_cid = int(cur.fetchone()[0])
-            old_to_new_component[c.component_ID] = new_cid
 
-        # 6️⃣ Copy related component tables
-        if old_to_new_component:
-            old_ids_tuple = tuple(old_to_new_component.keys())
-            q_marks = ",".join(["?"] * len(old_ids_tuple))
+            new_cid = cur.fetchone()[0]
+            old_to_new[c[0]] = new_cid
 
-            # --- MFG Materials ---
-            cur.execute(f"""
-                SELECT component_ID, material_ID, quantity
-                FROM component_MFG_Materials
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for m in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_MFG_Materials (component_ID, material_ID, quantity)
-                    VALUES (?, ?, ?)
-                """, (old_to_new_component[m.component_ID], m.material_ID, m.quantity or 0))
+        # 6️⃣ Copy all related component tables
+        for old_id, new_id in old_to_new.items():
 
-            # --- MFG Labor ---
-            cur.execute(f"""
-                SELECT component_ID, labor_ID, quantity
-                FROM component_MFG_Labor
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for l in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_MFG_Labor (component_ID, labor_ID, quantity)
-                    VALUES (?, ?, ?)
-                """, (old_to_new_component[l.component_ID], l.labor_ID, l.quantity or 0))
+            cur.execute("""
+                INSERT INTO "component_MFG_Materials" ("component_ID", "material_ID", quantity)
+                SELECT %s, "material_ID", quantity
+                FROM "component_MFG_Materials"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
 
-            # --- Install Materials ---
-            cur.execute(f"""
-                SELECT component_ID, material_description, material_unit, unit_cost, quantity
-                FROM component_Install_Materials
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for im in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_Install_Materials (component_ID, material_description, material_unit, unit_cost, quantity)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    old_to_new_component[im.component_ID],
-                    im.material_description, im.material_unit,
-                    im.unit_cost or 0, im.quantity or 0
-                ))
+            cur.execute("""
+                INSERT INTO "component_MFG_Labor" ("component_ID", "labor_ID", quantity)
+                SELECT %s, "labor_ID", quantity
+                FROM "component_MFG_Labor"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
 
-            # --- Install Labor ---
-            cur.execute(f"""
-                SELECT component_ID, install_labor_ID, quantity
-                FROM component_Install_Labor
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for il in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_Install_Labor (component_ID, install_labor_ID, quantity)
-                    VALUES (?, ?, ?)
-                """, (
-                    old_to_new_component[il.component_ID],
-                    il.install_labor_ID, il.quantity or 0
-                ))
+            cur.execute("""
+                INSERT INTO "component_install_Materials" ("component_ID", material_description, material_unit, unit_cost, quantity)
+                SELECT %s, material_description, material_unit, unit_cost, quantity
+                FROM "component_install_Materials"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
 
-            # --- EMC Units ---
-            cur.execute(f"""
-                SELECT component_ID, EMC_description, unit_cost, quantity
-                FROM component_EMC
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for e in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_EMC (component_ID, EMC_description, unit_cost, quantity)
-                    VALUES (?, ?, ?, ?)
-                """, (
-                    old_to_new_component[e.component_ID],
-                    e.EMC_description, e.unit_cost or 0, e.quantity or 0
-                ))
+            cur.execute("""
+                INSERT INTO "component_install_Labor" ("component_ID", "install_labor_ID", quantity)
+                SELECT %s, "install_labor_ID", quantity
+                FROM "component_install_Labor"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
 
-            # --- Rental Equipment ---
-            cur.execute(f"""
-                SELECT component_ID, equipment_description, unit_cost, quantity
-                FROM component_Rental_Equipment
-                WHERE component_ID IN ({q_marks})
-            """, old_ids_tuple)
-            for re in cur.fetchall():
-                cur.execute("""
-                    INSERT INTO component_Rental_Equipment (component_ID, equipment_description, unit_cost, quantity)
-                    VALUES (?, ?, ?, ?)
-                """, (
-                    old_to_new_component[re.component_ID],
-                    re.equipment_description, re.unit_cost or 0, re.quantity or 0
-                ))
+            cur.execute("""
+                INSERT INTO "component_EMC" ("component_ID", "EMC_description", unit_cost, quantity)
+                SELECT %s, "EMC_description", unit_cost, quantity
+                FROM "component_EMC"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
+
+            cur.execute("""
+                INSERT INTO "component_Rental_Equipment" ("component_ID", equipment_description, unit_cost, quantity)
+                SELECT %s, equipment_description, unit_cost, quantity
+                FROM "component_Rental_Equipment"
+                WHERE "component_ID" = %s
+            """, (new_id, old_id))
 
         conn.commit()
 
         # 7️⃣ Recalculate totals for each new component
-        for old_cid, new_cid in old_to_new_component.items():
-            cur.execute("SELECT component_type_ID FROM Components WHERE component_ID=?", (new_cid,))
+        for _, new_cid in old_to_new.items():
+            cur.execute("SELECT \"component_type_ID\" FROM \"Components\" WHERE \"component_ID\"=%s", (new_cid,))
             ctype = cur.fetchone()[0]
 
-            # 🚫 Skip recalculating Manual Price Entry components (ID = 10)
             if ctype == 10:
                 continue
-
-            if ctype == 1:
-                update_component_totals(new_cid)
             elif ctype == 2:
                 update_install_component_totals(new_cid)
             elif ctype == 4:
@@ -9088,28 +9537,25 @@ def add_customer_quote_to_opportunity(opportunity_id, customer_line_id):
             else:
                 update_component_totals(new_cid)
 
-        # 8️⃣ Roll up totals to the new Line_Item
+        # 8️⃣ Roll totals up to Line_Item
         cur.execute("""
             SELECT
-                SUM(IIF(ISNULL(unit_price),0,unit_price) * IIF(ISNULL(quantity),0,quantity)) AS total_price,
-                SUM(IIF(ISNULL(unit_cost),0,unit_cost) * IIF(ISNULL(quantity),0,quantity)) AS total_cost
-            FROM Components
-            WHERE line_ID=?
+                SUM(COALESCE(unit_price,0) * COALESCE(quantity,0)),
+                SUM(COALESCE(unit_cost,0) * COALESCE(quantity,0))
+            FROM "Components"
+            WHERE "line_ID" = %s
         """, (new_line_id,))
-        totals = cur.fetchone()
-        total_price = float(totals.total_price or 0)
-        total_cost = float(totals.total_cost or 0)
+        total_price, total_cost = cur.fetchone()
 
         cur.execute("""
-            UPDATE Line_Items
-            SET unit_price=?, unit_cost=?
-            WHERE line_ID=?
-        """, (total_price, total_cost, new_line_id))
+            UPDATE "Line_Items"
+            SET unit_price=%s, unit_cost=%s
+            WHERE "line_ID"=%s
+        """, (total_price or 0, total_cost or 0, new_line_id))
 
         conn.commit()
         conn.close()
 
-        print(f"[SUCCESS] Created new line item {new_line_id} with copied components and recalculated totals.")
         return jsonify({"success": True, "new_line_id": new_line_id})
 
     except Exception as e:
@@ -9127,31 +9573,39 @@ def add_customer_quote_to_opportunity(opportunity_id, customer_line_id):
 
 @app.route("/get_customer_quotes/<int:opportunity_id>")
 def get_customer_quotes(opportunity_id):
-    conn = pyodbc.connect(CONN_STR)
+    conn = get_db_connection()
     cur = conn.cursor()
 
-    # Find the customer for this opportunity
-    cur.execute("SELECT customer_ID FROM Opportunities WHERE opportunity_ID=?", (opportunity_id,))
+    # 1️⃣ Find the customer for this opportunity
+    cur.execute("""
+        SELECT "customer_ID"
+        FROM "Opportunities"
+        WHERE "opportunity_ID" = %s
+    """, (opportunity_id,))
     row = cur.fetchone()
+
     if not row:
         conn.close()
         return jsonify([])
 
-    customer_id = row.customer_ID
+    customer_id = row[0]
 
-    # Pull all saved line items for that customer
+    # 2️⃣ Pull all saved customer line items
     cur.execute("""
-        SELECT line_ID, line_item_description, quantity, unit_price
-        FROM Customer_Line_Items
-        WHERE customer_ID=?
-        ORDER BY line_item_sequence, line_ID
+        SELECT "line_ID", line_item_description, quantity, unit_price
+        FROM "Customer_Line_Items"
+        WHERE "customer_ID" = %s
+        ORDER BY line_item_sequence, "line_ID"
     """, (customer_id,))
-    items = [{
-        "line_ID": r.line_ID,
-        "line_item_description": r.line_item_description or "",
-        "quantity": float(r.quantity or 0),
-        "unit_price": float(r.unit_price or 0)
-    } for r in cur.fetchall()]
+
+    items = []
+    for r in cur.fetchall():
+        items.append({
+            "line_ID": r[0],
+            "line_item_description": r[1] or "",
+            "quantity": float(r[2] or 0),
+            "unit_price": float(r[3] or 0)
+        })
 
     conn.close()
     return jsonify(items)
@@ -9163,68 +9617,81 @@ def get_customer_quotes(opportunity_id):
 @app.route("/add_standard_line_item/<int:opportunity_id>/<int:standard_id>", methods=["POST"])
 def add_standard_line_item(opportunity_id, standard_id):
     try:
-        conn = pyodbc.connect(CONN_STR)
+        conn = get_db_connection()
         cur = conn.cursor()
 
-        # Fetch from Standard_Line_Items
+        # 1️⃣ Fetch from Standard_Line_Items
         cur.execute("""
             SELECT line_item_description, quantity, unit_price
-            FROM Standard_Line_Items
-            WHERE ID = ?
+            FROM "Standard_Line_Items"
+            WHERE "ID" = %s
         """, (standard_id,))
         std = cur.fetchone()
+
         if not std:
             conn.close()
             return jsonify({"success": False, "message": "Standard item not found."}), 404
 
-        # Determine next sequence number
+        line_item_description = std[0]
+        quantity = std[1] or 1
+        unit_price = std[2] or 0
+
+        # 2️⃣ Determine next sequence number
         cur.execute("""
-            SELECT IIF(ISNULL(MAX(line_item_sequence)), 0, MAX(line_item_sequence))
-            FROM Line_Items
-            WHERE opportunity_ID = ?
+            SELECT COALESCE(MAX(line_item_sequence), 0)
+            FROM "Line_Items"
+            WHERE "opportunity_ID" = %s
         """, (opportunity_id,))
         next_seq = (cur.fetchone()[0] or 0) + 10
 
-        # Determine next available line_ID
+        # 3️⃣ Determine next available line_id (across *both* tables)
         cur.execute("""
-            SELECT MAX(IIF(ISNULL(x.max_id),0,x.max_id))
+            SELECT MAX(max_id) 
             FROM (
-                SELECT MAX(line_ID) AS max_id FROM Line_Items
+                SELECT MAX("line_ID") AS max_id FROM "Line_Items"
                 UNION ALL
-                SELECT MAX(line_ID) AS max_id FROM Customer_Line_Items
+                SELECT MAX("line_ID") AS max_id FROM "Customer_Line_Items"
             ) AS x
         """)
         next_line_id = (cur.fetchone()[0] or 0) + 1
 
-        # Insert into Line_Items (no component)
+        # 4️⃣ Insert the new line item
         cur.execute("""
-            INSERT INTO Line_Items (
-                line_ID, opportunity_ID, line_item_description, 
-                quantity, unit_cost, unit_price, 
+            INSERT INTO "Line_Items" (
+                "line_ID", "opportunity_ID", line_item_description,
+                quantity, unit_cost, unit_price,
                 line_item_sequence, activation_status
             )
-            VALUES (?, ?, ?, ?, 0, ?, ?, 'ACTIVE')
+            VALUES (%s, %s, %s, %s, 0, %s, %s, 'ACTIVE')
         """, (
             next_line_id,
             opportunity_id,
-            std.line_item_description,
-            std.quantity or 1,
-            std.unit_price or 0,
+            line_item_description,
+            quantity,
+            unit_price,
             next_seq
         ))
 
         conn.commit()
         conn.close()
+
         return jsonify({"success": True, "message": "Standard line item added."})
 
     except Exception as e:
         print("❌ ERROR ADDING STANDARD LINE ITEM:", str(e))
-        import traceback; traceback.print_exc()
-        try: conn.close()
-        except: pass
+        import traceback
+        traceback.print_exc()
+
+        try:
+            conn.close()
+        except:
+            pass
+
         return jsonify({"success": False, "message": str(e)})
 
 ########################################################################################################################
+
+"""LOGIN ROUTE"""
 
 @app.route("/login", methods=["GET", "POST"])
 def login_route():
@@ -9232,24 +9699,27 @@ def login_route():
         email = request.form.get("email").strip()
         password = request.form.get("password").strip()
 
-        conn = pyodbc.connect(CONN_STR)
+        conn = get_db_connection()
         cur = conn.cursor()
+
         cur.execute("""
-            SELECT employee_ID, employee_type
-            FROM Employees
-            WHERE employee_email = ? AND password = ?
+            SELECT "employee_ID", employee_type
+            FROM "Employees"
+            WHERE employee_email = %s AND password = %s
         """, (email, password))
+
         row = cur.fetchone()
         conn.close()
 
         if row:
-            session["employee_ID"] = row.employee_ID
-            session["employee_type"] = row.employee_type
+            session["employee_ID"] = row[0]         # employee_id
+            session["employee_type"] = row[1]       # employee_type
             session["email"] = email
 
-            return redirect(url_for("index"))  # go to home screen
+            return redirect(url_for("index"))
         else:
-            return render_template_string(LOGIN_TEMPLATE, error="Invalid email or password.")
+            return render_template_string(LOGIN_TEMPLATE,
+                                          error="Invalid email or password.")
 
     return render_template_string(LOGIN_TEMPLATE)
 
