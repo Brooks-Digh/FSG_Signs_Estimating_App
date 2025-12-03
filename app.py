@@ -21,14 +21,11 @@ app.secret_key = 'super_secret_key_123'
 """"""
 ########################################################################################################################
 
+import os
+import psycopg2
+
 def get_db_connection():
-    return psycopg2.connect(
-        dbname="sign_app",
-        user="postgres",
-        password="Rosie225!",  # change to your actual password
-        host="localhost",
-        port="5432"
-    )
+    return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 ########################################################################################################################
 ########################################################################################################################
